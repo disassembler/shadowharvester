@@ -1104,12 +1104,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "minicbor"
-version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f182275033b808ede9427884caa8e05fa7db930801759524ca7925bd8aa7a82"
-
-[[package]]
 name = "minicbor-derive"
 version = "0.15.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1323,7 +1317,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b2737b05f0dbb6d197feeb26ef15d2567e54833184bd469f5655a0537da89fa"
 dependencies = [
  "hex",
- "minicbor 0.25.1",
+ "minicbor",
  "serde",
  "thiserror",
 ]
@@ -2049,9 +2043,10 @@ dependencies = [
  "hex",
  "hex-literal",
  "indicatif",
- "minicbor 2.1.1",
+ "minicbor",
  "pallas",
  "pallas-addresses",
+ "pallas-codec",
  "pallas-configs",
  "pallas-crypto",
  "rand_core",
