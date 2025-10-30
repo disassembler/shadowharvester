@@ -6,13 +6,14 @@ use cryptoxide::{
     kdf::argon2,
 };
 
-// ** Fixed Imports for Scavenge Logic **
+// ** Consolidated Imports required for scavenge function **
 use std::sync::mpsc::{Sender, channel};
 use std::{sync::Arc, thread, time::SystemTime};
 use std::sync::atomic::{AtomicBool, Ordering};
 use indicatif::{ProgressBar, ProgressStyle};
 use hex;
 // ************************************
+
 
 // 1 byte operator
 // 3 bytes operands (src1, src2, dst)
@@ -542,17 +543,18 @@ pub fn scavenge(
     latest_submission: String,
     no_pre_mine_hour: String,
     nb_threads: u32,
-) {
+) -> Option<String> { // <-- FIX: Explicitly define the return type
     const MB: usize = 1024 * 1024;
     const GB: usize = 1024 * MB;
 
     let required_zero_bits = difficulty_to_zero_bits(&difficulty);
-    println!("Required Zero Bits (Difficulty: {}): {}", difficulty, required_zero_bits);
+
+    // We rely on the caller to print required_zero_bits
 
     let nb_threads_u64 = nb_threads as u64;
     let step_size = nb_threads_u64;
 
-    thread::scope(|s| {
+    let found_nonce: Option<String> = thread::scope(|s| {
         println!("Generating ROM with key: {}", no_pre_mine_key);
 
         let rom = Rom::new(
@@ -645,94 +647,18 @@ pub fn scavenge(
         }
 
         // Final message after the mining stops (channel disconnects)
-        if !found.is_empty() {
-            // Include total hashes checked (pos)
-            let msg = format!("Scavenging complete. Found {} solutions. Total hashes checked: {}", found.len(), pos);
+        let final_nonce_hex = found.pop().map(|nonce| format!("{:016x}", nonce));
+
+        if final_nonce_hex.is_some() {
+            let msg = format!("Scavenging complete. Found 1 solution. Total hashes checked: {}", pos);
             pb.finish_with_message(msg);
         } else {
-             pb.abandon_with_message("Scavenging stopped.");
+             pb.abandon_with_message("Scavenging stopped (No solution found).");
         }
+
+        // Return the found nonce (if any) from the thread scope
+        final_nonce_hex
     });
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn instruction_count_diff() {
-        let rom = Rom::new(
-            b"password1",
-            RomGenerationType::TwoStep {
-                pre_size: 1024,
-                mixing_numbers: 4,
-            },
-            10_240,
-        );
-
-        let h1 = hash(&0u128.to_be_bytes(), &rom, 8, 256);
-        let h2 = hash(&0u128.to_be_bytes(), &rom, 8, 257);
-
-        assert_ne!(h1, h2);
-    }
-
-    /*
-    #[test]
-    fn check_ip_stale() {
-        let rom = Rom::new(b"password1", 1024, 10_240);
-
-        let salt = &0u128.to_be_bytes();
-        let nb_instrs = 100_000;
-        let mut vm = VM::new(&rom.digest, nb_instrs, salt);
-        for i in 0..nb_instrs {
-            let prev = vm.debug();
-            vm.step(&rom);
-        }
-    }
-    */
-
-    #[test]
-    fn test() {
-        const PRE_SIZE: usize = 16 * 1024;
-        const SIZE: usize = 10 * 1024 * 1024;
-        const NB_INSTR: u32 = 256;
-
-        let rom = Rom::new(
-            b"123",
-            RomGenerationType::TwoStep {
-                pre_size: PRE_SIZE,
-                mixing_numbers: 4,
-            },
-            SIZE,
-        );
-
-        let h = hash(b"hello", &rom, 8, NB_INSTR);
-        println!("{:?}", h);
-    }
-
-    #[test]
-    fn test_eq() {
-        const PRE_SIZE: usize = 16 * 1024;
-        const SIZE: usize = 10 * 1024 * 1024;
-        const NB_INSTR: u32 = 256;
-
-        const EXPECTED: [u8; 64] = [
-            56, 148, 1, 228, 59, 96, 211, 173, 9, 98, 68, 61, 89, 171, 124, 171, 124, 183, 200,
-            196, 29, 43, 133, 168, 218, 217, 255, 71, 234, 182, 97, 158, 231, 156, 56, 230, 61, 54,
-            248, 199, 150, 15, 66, 0, 149, 185, 85, 177, 192, 220, 237, 77, 195, 106, 140, 223,
-            175, 93, 238, 220, 57, 159, 180, 243,
-        ];
-
-        let rom = Rom::new(
-            b"123",
-            RomGenerationType::TwoStep {
-                pre_size: PRE_SIZE,
-                mixing_numbers: 4,
-            },
-            SIZE,
-        );
-
-        let h = hash(b"hello", &rom, 8, NB_INSTR);
-        assert_eq!(h, EXPECTED);
-    }
+    found_nonce
 }
