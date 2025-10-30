@@ -22,8 +22,7 @@ fn run_single_mining_cycle(
     donate_to_option: Option<&String>,
     challenge_params: &api::ChallengeData,
     // NEW: Secret key is passed for dynamic donation signing
-    pay_sk: &pallas_crypto::key::ed25519::SecretKey,
-    pay_vk: &pallas_crypto::key::ed25519::PublicKey,
+    keypair: &cardano::KeyPairAndAddress,
 ) -> bool {
     let found_nonce = scavenge(
         mining_address.clone(),
@@ -55,13 +54,13 @@ fn run_single_mining_cycle(
 
             // Generate dynamic signature for donation message
             let donation_message = format!("Assign accumulated Scavenger rights to: {}", destination_address);
-            let donation_signature = cardano::cip8_sign(&pay_sk, &donation_message);
+            let donation_signature = cardano::cip8_sign(keypair, &donation_message);
 
             if let Err(e) = api::donate_to(
                 api_url,
                 &mining_address,
                 destination_address,
-                &donation_signature, // Dynamic Signature
+                &donation_signature.0, // Dynamic Signature
             ) {
                 eprintln!("FATAL ERROR: Donation failed. Details: {}", e);
                 return false;
@@ -156,19 +155,20 @@ fn run_app(cli: Cli) -> Result<(), String> {
         })?;
 
         // 1. Key Generation/Loading
-        let (pay_sk, pay_vk, _generated_address, pub_key_hex) = cardano::generate_cardano_key_and_address();
+        let key_pair = cardano::generate_cardano_key_and_address();
+        let mining_address = key_pair.2.to_bech32().unwrap();
 
         // 2. Registration (Dynamic Signature)
         let reg_message = tc_response.message.clone();
-        let reg_signature = cardano::cip8_sign(&pay_sk, &reg_message);
+        let reg_signature = cardano::cip8_sign(&key_pair, &reg_message);
 
         println!("\n[REGISTRATION] Attempting registration for address: {}", mining_address);
         if let Err(e) = api::register_address(
             &api_url,
             &mining_address,
             &tc_response.message,
-            &reg_signature,
-            &pub_key_hex,
+            &reg_signature.0,
+            &hex::encode(&key_pair.1.as_ref()),
         ) {
             eprintln!("Address registration failed: {}. Cannot start mining cycle.", e);
             return Err("Address registration failed.".to_string());
@@ -188,8 +188,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
             threads,
             donate_to_option_ref,
             &challenge_params,
-            &pay_sk,
-            &pay_vk,
+            &key_pair,
         ) {
             println!("\nSingle run complete.");
         }
@@ -204,20 +203,21 @@ fn run_app(cli: Cli) -> Result<(), String> {
 
         loop {
             // 1. Generate New Key Pair for this cycle
-            let (pay_sk, pay_vk, generated_mining_address, pub_key_hex) = cardano::generate_cardano_key_and_address();
+            let key_pair = cardano::generate_cardano_key_and_address();
+            let generated_mining_address = key_pair.2.to_bech32().unwrap();
 
             // 2. Registration (Dynamic Signature)
             println!("\n[CYCLE START] Generated Address: {}", generated_mining_address);
 
             let reg_message = tc_response.message.clone();
-            let reg_signature = cardano::cip8_sign(&pay_sk, &reg_message);
+            let reg_signature = cardano::cip8_sign(&key_pair, &reg_message);
 
             if let Err(e) = api::register_address(
                 &api_url,
                 &generated_mining_address,
                 &tc_response.message,
-                &reg_signature,
-                &pub_key_hex,
+                &reg_signature.0,
+                &hex::encode(&key_pair.1.as_ref()),
             ) {
                 eprintln!("Registration failed: {}. Cannot start mining cycle.", e);
                 break;
@@ -226,19 +226,18 @@ fn run_app(cli: Cli) -> Result<(), String> {
             // 3. Mining and Submission
             print_mining_setup(
                 &api_url,
-                Some(generated_mining_address.as_str()),
+                Some(&generated_mining_address.to_string()),
                 threads,
                 &challenge_params
             );
 
             if !run_single_mining_cycle(
                 &api_url,
-                generated_mining_address, // Use ownership of the generated address
+                generated_mining_address.to_string(), // Use ownership of the generated address
                 threads,
                 donate_to_option_ref,
                 &challenge_params,
-                &pay_sk,
-                &pay_vk,
+                &key_pair,
             ) {
                 // If mining or submission fails, break the continuous loop
                 eprintln!("Critical failure in cycle. Terminating continuous mining.");

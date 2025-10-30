@@ -40,16 +40,12 @@ mod cip8_tests {
     #[test]
     /// Tests that the correct public key and base address (with null staking part) are derived from the secret key.
     fn test_address_derivation_from_skey() {
-        let skey_bytes = hex::decode(SKEY_HEX).expect("Invalid secret key hex");
-        let skey_array: [u8; 32] = skey_bytes
-            .try_into()
-            .expect("Secret key must be exactly 32 bytes");
-        let sk = SecretKey::from(skey_array);
+        let keypair = generate_cardano_key_pair_from_skey(&SKEY_HEX.to_string());
 
-        // Derive the address using the standard Shelley base address construction
-        let (vk, addr) = derive_address_from_skey(&sk);
+        let vk_hex = hex::encode(keypair.1.as_ref());
 
-        let vk_hex = hex::encode(vk.as_ref());
+        let addr = keypair.2.to_bech32().unwrap().to_string();
+
 
         // 1. Verify Public Key
         assert_eq!(
@@ -74,22 +70,13 @@ mod cip8_tests {
     /// Tests that the core Ed25519 signature component matches the expected value
     /// when signing the T&C message hash.
     fn test_cip8_core_signature_match() {
-        use shadow_harvester_lib::cardano;
+        let keypair = generate_cardano_key_pair_from_skey(&SKEY_HEX.to_string());
 
-        let skey_bytes = hex::decode(SKEY_HEX).expect("Invalid secret key hex");
-        let skey_array: [u8; 32] = skey_bytes
-            .try_into()
-            .expect("Secret key must be exactly 32 bytes");
-        let sk = SecretKey::from(skey_array);
-
-        // Derive the address using the standard Shelley base address construction
-        let (vk, addr) = derive_address_from_skey(&sk);
-
-        let vk_hex = hex::encode(vk.as_ref());
+        let vk_hex = hex::encode(keypair.1.as_ref());
 
         // Sign the message hash using the SecretKey
-        let signature = cip8_sign(&sk, TC_MESSAGE);
-        let signature_hex = hex::encode(signature);
+        let signature = cip8_sign(&keypair, TC_MESSAGE);
+        let signature_hex = hex::encode(signature.0);
 
 
         // We check if the unique signature component matches the value seen in the JS output.

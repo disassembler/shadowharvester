@@ -39,6 +39,7 @@ pallas-crypto = "0.33"
 rand_core = { version = "0.6", features = ["std"] }
 pallas-configs = "0.33.0"
 pallas = "0.33.0"
+minicbor = "2.1.1"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
