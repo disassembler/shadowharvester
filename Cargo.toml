@@ -20,6 +20,7 @@ name = "shadow-harvester"
 path = "src/main.rs"
 bench = false
 harness = false
+test = false
 
 [dependencies]
 cryptoxide = "~0.5.1"

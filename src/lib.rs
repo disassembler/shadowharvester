@@ -1,4 +1,5 @@
 pub mod rom;
+pub mod cardano;
 pub use rom::{RomGenerationType, Rom, RomDigest};
 
 use cryptoxide::{
