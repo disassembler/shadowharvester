@@ -1,15 +1,12 @@
  #[cfg(test)]
 mod rom_integration_tests {
-    // FIX 1: Simplify import and rely on the types being publicly exported from lib.rs
     use shadow_harvester_lib::{RomGenerationType, Rom};
     use shadow_harvester_lib::hash;
 
     use cryptoxide::hashing::blake2b::{self};
     use std::{assert_eq, convert::TryInto};
 
-    use hex;
 
-    // --- CONSTANTS ---
     const ROM_SIZE: usize = 1_073_741_824;
     const PRE_SIZE: usize = 16_777_216;
     const MIXING_NUMBERS: usize = 4;
@@ -18,7 +15,6 @@ mod rom_integration_tests {
 
     // NOTE: Replace these with the actual derived values.
     const EXPECTED_V0_HEX: &str = "118a9e880ecef64f9dff3eb94db22b0f417524697ae4b9e8037b1328de0765fe";
-    const EXPECTED_OFFSETS_DIGEST_HEX: &str = "<PASTE THE FULL 256-BYTE HEX DIGEST HERE>";
     const EXPECTED_ROM_DIGEST_HEX: &str = "363c87d27c93f1013ed03f19ca39c6ea8b83b24b607df70dccc8967ad59c78fe6aeeea9978e7dbfaba584550e568808f75202c48fc9f4236184b8ee5709816c8";
 
     fn print_hex(name: &str, data: &[u8]) {
@@ -82,18 +78,6 @@ mod rom_integration_tests {
         }
     }
 
-    fn hash_offset_command(seed: &[u8], i: u32) -> [u8; 64] {
-        // Remove 'mut' and chain the calls.
-        let blake = blake2b::Context::<512>::new()
-            .update(seed)
-            .update(b"generation offset")
-            .update(&i.to_le_bytes());
-
-        let digest_vec = blake.finalize();
-        digest_vec.try_into().expect("Offset hash size mismatch")
-    }
-
-
     // -------------------------------------------------------------------------
     //                              TEST CASES
     // -------------------------------------------------------------------------
@@ -118,8 +102,7 @@ mod rom_integration_tests {
         );
     }
 
-// Test 3: Full integration test—constructs the entire ROM object and checks the final digest.
-    // #[test]
+    #[test]
     fn test_full_rom_construction() {
         let rom_seed_bytes = ROM_SEED_ASCII_HEX.as_bytes();
         let gen_type = RomGenerationType::TwoStep {
@@ -169,27 +152,14 @@ mod rom_integration_tests {
 
     }
 
-     // In tests/digest.rs (Inside rom_integration_tests module)
-
-    // --- CONSTANTS FOR CHUNK MIXING TEST (Must be populated) ---
-
-    // A short slice of the initial mixing buffer (e.g., first 128 bytes)
     const TEST_MIXING_BUFFER_SLICE_HEX: &str = "b89b48b36e71912f26e2d57c59996621f248d827203fa2206e3a090aa37e242fb94a5f21b4346c6f93ee77e202103bc652a972820a85d9a05f62adcc408b967169ad0046dcbabe8e8763a7726ba5ebfb03ea5f285326d48b18d125de2f7531a121e544a8355bcd4bcc26f0c0571e30a8858cf59180ea3197d8c769ec052f0805";
-
-    // A slice of the H' output used for base offsets
     const TEST_OFFSETS_BS_HEX: &str = "18fad3a7c3f06ab89a68962844ebea97e28e11ea741c39125fcb84e3aa511f5ef705bb48fb9adf808dae9d417573435a9c0616243a7eab6d5761e8a6728d7843";
-
-    // The full concatenated 256-byte output from the offset logic
     const TEST_OFFSETS_DIFF_HEX: &str = "c4b4ca4adeabe082c0b94669731a1aa87a5874de54fb942e13636bdbaf4bf66ff5f33ce3a2d7b847c6558e5c614644d046c903563a9a788a324d88110b9a6b5e3c85e1aec45f9bb209c3413dab9963d6716663a43c8561fba38edb23f20e919967156a2b147634e39a401c607022904c64ddba1f25968fd387282dcfb0e69b9dbd3ac7808e0b733be3b77ba744e40e46acccf6f51a784c30d4998c9afb6bdb796ed2d4f51b8ed6e261af36e89d7b9600dc3d245614cfbad292deafae0834a26720d0019c93982d9b79f26096c2ec19a4e257adb213acac3e2e168f452e6fc7ecb4aec29c6efec4e4a156876f34e4b14796b2fbd835f46b3c00702245557c7fc6";
-
-    // The final expected 64-byte chunk output for i=1
      const EXPECTED_CHUNK_I0_HEX: &str = "80f621c53c5f7e4d3194bd6b7be2392d899046046368e329f5c7f0338b60c156f658bd8ca7c8cab290aa36565a17ff58e42708814bcba3f7de5a3fab029e6340";
      const EXPECTED_CHUNK_I1_HEX: &str = "d5fbf206ec6c81339bc08e253d0caf50ed7bfed6d4f6d3b1e6528e2950e1c55746b882f876cc8ebdca1af0b273aa76e73603dd19034681405dea0bf3a34c927d";
      const EXPECTED_CHUNK_I2_HEX: &str = "d5d56c413dd00d66d55f887e38b82e0b3b5efd79f148f42d798944cccfb684bc13e1c09dcebf83e1d4820d89e24c1d73b545398a95698d1c6817d6886f5e0a46";
      const EXPECTED_CHUNK_I3_HEX: &str = "aa034c66ac0e914a9e89ddd1c463f33d3cf1515baac2a45e3a6f00e95e30550b50d4dc3cf209c663627f0f3ac664b7478386342e77eb7048f4771e14974c486b";
 
-    const DATASET_ACCESS_SIZE: usize = 64;
-    const CHUNK_INDEX: usize = 1; // Test the second chunk (i=1)
 
     /// Helper: Converts the 64-byte Blake2b digest to a 128-element Vec of u16s (little-endian)
     fn decode_offsets_diff(hex_digest: &str) -> Vec<u16> {
@@ -201,7 +171,7 @@ mod rom_integration_tests {
     }
 
     /// Test 5: Verifies the single chunk mixing logic (indexing and xorbuf).
-//    #[test]
+    #[test]
     fn test_single_chunk_mixing_logic() {
         // We need 'super' or 'crate::rom::xorbuf' if it's not exposed publicly,
         // but assuming it's made public:
@@ -226,7 +196,6 @@ mod rom_integration_tests {
 
         let expected_mixing_buffer = hex::decode(TEST_MIXING_BUFFER_SLICE_HEX).unwrap();
         let expected_offsets_bs = hex::decode(TEST_OFFSETS_BS_HEX).unwrap();
-        let expected_offsets_diff_vec_u8 = hex::decode(TEST_OFFSETS_DIFF_HEX).unwrap();
         let expected_offsets_diff_u16 = decode_offsets_diff(TEST_OFFSETS_DIFF_HEX);
 
         // Assertion 1: Mixing Buffer Slice (128 bytes)

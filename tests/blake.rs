@@ -48,7 +48,7 @@ mod tests {
         // Parameters extracted from hash.rs main() function:
         const MB: usize = 1024 * 1024;
         const GB: usize = 1024 * MB;
-        const ROM_SIZE: usize = 1 * GB;
+        const ROM_SIZE: usize = GB;
 
         // key = "fd651ac2725e3b9d804cc8b161c0709af14d6264f93e8d4afef0fd1142a3f011".as_bytes()
         let key_bytes = "fd651ac2725e3b9d804cc8b161c0709af14d6264f93e8d4afef0fd1142a3f011".as_bytes();
@@ -58,7 +58,7 @@ mod tests {
         let expected_seed: [u8; 32] = hex!("118a9e880ecef64f9dff3eb94db22b0f417524697ae4b9e8037b1328de0765fe");
 
         // --- ACTUAL CALCULATION ---
-        let actual_seed = blake2b_seed_logic(&key_bytes, ROM_SIZE);
+        let actual_seed = blake2b_seed_logic(key_bytes, ROM_SIZE);
 
         // 4. Custom assertion: Print hex on failure.
         assert!(
@@ -76,7 +76,7 @@ mod tests {
         // Parameters extracted from hash.rs main() function:
         const MB: usize = 1024 * 1024;
         const GB: usize = 1024 * MB;
-        const ROM_SIZE: usize = 1 * GB;
+        const ROM_SIZE: usize = GB;
 
         let pre_size = 16 * MB;
 
@@ -88,7 +88,7 @@ mod tests {
         let mut mixing_buffer = vec![0; pre_size];
 
         // --- ACTUAL CALCULATION ---
-        let seed_hash = blake2b_seed_logic(&key_bytes, ROM_SIZE);
+        let seed_hash = blake2b_seed_logic(key_bytes, ROM_SIZE);
         argon2::hprime(&mut mixing_buffer, &seed_hash);
 
 
@@ -107,8 +107,6 @@ mod tests {
     fn test_hprime_with_large_bytes_hash() {
         // Parameters extracted from hash.rs main() function:
         const MB: usize = 1024 * 1024;
-        const GB: usize = 1024 * MB;
-        const ROM_SIZE: usize = 1 * GB;
 
         let pre_size = 16 * MB;
 
@@ -120,7 +118,7 @@ mod tests {
         let mut mixing_buffer = vec![0; pre_size];
 
         // --- ACTUAL CALCULATION ---
-        argon2::hprime(&mut mixing_buffer, &key_bytes);
+        argon2::hprime(&mut mixing_buffer, key_bytes);
 
         print_hex("large prime", &mixing_buffer[0..31]);
 

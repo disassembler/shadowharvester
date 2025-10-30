@@ -26,10 +26,10 @@
 
           src = ./.;
 
-          buildInputs = [
-            pkgs.pkg-config
-            pkgs.openssl
-            pkgs.zlib
+          buildInputs = with pkgs; [
+            pkg-config
+            openssl
+            zlib
           ];
         };
 
@@ -39,13 +39,16 @@
           default = shadowHarvester;
         };
 
-        devShells.default = pkgs.mkShell {
+        devShells.default = with pkgs; mkShell {
           packages = [
-            pkgs.cargo
-            pkgs.rustc
-            pkgs.pkg-config
-            pkgs.openssl
-            pkgs.zlib
+            cargo
+            rustc
+            pkg-config
+            openssl
+            zlib
+            rust-analyzer
+            rustfmt
+            clippy
           ];
 
           shellHook = ''
