@@ -17,46 +17,11 @@
         "aarch64-darwin"
       ];
 
-      perSystem = { system, config, lib, pkgs, ... }: {
-        packages = {
-          shadowHarvester = let
-            naersk-lib = inputs.naersk.lib.${system};
-          in naersk-lib.buildPackage {
-            pname = "shadow-harvester";
-            version = "0.1.0";
-
-            src = with lib.fileset; toSource {
-              root = ./.;
-              fileset = unions [
-                ./Cargo.lock
-                ./Cargo.toml
-                ./src
-                ./tests
-              ];
-            };
-
-            buildInputs = with pkgs; [
-              pkg-config
-              openssl
-              zlib
-            ];
-          };
-
-          default = config.packages.shadowHarvester;
-        };
-
-        devShells.default = with pkgs; mkShell {
-          packages = [
-            cargo
-            rustc
-            pkg-config
-            openssl
-            zlib
-            rust-analyzer
-            rustfmt
-            clippy
-          ];
-        };
-      };
+      imports = [
+        nix/packages.nix
+        nix/devShells.nix
+        nix/nixosModules.nix
+        nix/overlays.nix
+      ];
     };
 }
