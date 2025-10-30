@@ -4,10 +4,7 @@ mod rom_integration_tests {
     use shadow_harvester_lib::{RomGenerationType, Rom};
     use shadow_harvester_lib::hash;
 
-    use cryptoxide::{
-        hashing::blake2b::{self, Blake2b},
-        kdf::argon2,
-    };
+    use cryptoxide::hashing::blake2b::{self};
     use std::{assert_eq, convert::TryInto};
 
     use hex;

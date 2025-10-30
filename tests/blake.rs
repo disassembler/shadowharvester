@@ -2,7 +2,7 @@
 mod tests {
     //use cryptoxide::digest::Digest;
     use cryptoxide::{
-        hashing::blake2b::{self, Blake2b, Context},
+        hashing::blake2b::{self, Context},
         kdf::argon2,
     };
     use hex_literal::hex;
