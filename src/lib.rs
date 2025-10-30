@@ -646,8 +646,8 @@ pub fn scavenge(
 
         // Final message after the mining stops (channel disconnects)
         if !found.is_empty() {
-            // FIX: Bind the String to a variable before passing it to avoid E0716
-            let msg = format!("Scavenging complete. Found {} solutions.", found.len());
+            // Include total hashes checked (pos)
+            let msg = format!("Scavenging complete. Found {} solutions. Total hashes checked: {}", found.len(), pos);
             pb.finish_with_message(msg);
         } else {
              pb.abandon_with_message("Scavenging stopped.");
