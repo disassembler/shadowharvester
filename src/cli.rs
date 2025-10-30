@@ -2,6 +2,9 @@
 
 use clap::{Parser, Subcommand};
 
+// Default value defined here as the constant was in main.rs before.
+const DEFAULT_ADDRESS: &str = "addr_test1qq4dl3nhr0axurgcrpun9xyp04pd2r2dwu5x7eeam98psv6dhxlde8ucclv2p46hm077ds4vzelf5565fg3ky794uhrq5up0he";
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
@@ -17,8 +20,12 @@ pub struct Cli {
     pub accept_tos: bool,
 
     /// Registered Cardano address to submit solutions for.
-    #[arg(long, default_value = "addr_test1qq4dl3nhr0axurgcrpun9xyp04pd2r2dwu5x7eeam98psv6dhxlde8ucclv2p46hm077ds4vzelf5565fg3ky794uhrq5up0he")]
+    #[arg(long, default_value = DEFAULT_ADDRESS)]
     pub address: String,
+
+    /// Number of worker threads to use for mining.
+    #[arg(long, default_value_t = 24)] // NEW: Defaults to 24
+    pub threads: u32,
 }
 
 #[derive(Subcommand, Debug)]
@@ -26,5 +33,4 @@ pub enum Commands {
     /// Generates a new random Ed25519 key pair and prints the corresponding payment address.
     #[command(author, version, about = "Generate new keys")]
     KeyGen,
-    // Add more subcommands here as the miner evolves (e.g., Register, Submit)
 }
