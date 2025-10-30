@@ -5,10 +5,9 @@ use reqwest;
 use serde_json;
 
 // FIX: Import MOCK constants from the new module
-use crate::constants::{MOCK_PUBKEY, MOCK_SIGNATURE, DONATE_MESSAGE_SIG}; // Added DONATE_MESSAGE_SIG for completeness
+use crate::constants::{MOCK_PUBKEY, MOCK_SIGNATURE, DONATE_MESSAGE_SIG};
 
 // --- RESPONSE STRUCTS ---
-// ... (All structs remain the same)
 
 #[derive(Debug, Deserialize)]
 pub struct TandCResponse {
@@ -32,13 +31,23 @@ pub struct ChallengeData {
     #[serde(rename = "no_pre_mine_hour")]
     pub no_pre_mine_hour_str: String,
     pub latest_submission: String,
+    // NEW: Fields for listing command
+    pub challenge_number: u16,
+    pub day: u8,
+    pub issued_at: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct ChallengeResponse {
+pub struct ChallengeResponse { // Made struct public for use in main.rs
     pub code: String,
     pub challenge: Option<ChallengeData>,
     pub starts_at: Option<String>,
+    // NEW: Fields for listing command (overall status)
+    pub mining_period_ends: Option<String>,
+    pub max_day: Option<u8>,
+    pub total_challenges: Option<u16>,
+    pub current_day: Option<u8>,
+    pub next_challenge_starts_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,6 +242,45 @@ pub fn donate_to(
             Err(_) => {
                 Err(format!("HTTP Error {} with unparseable body: {}", status.as_u16(), body_text))
             }
+        }
+    }
+}
+
+/// Fetches the raw Challenge Response object from the API.
+// NEW FUNCTION
+pub fn fetch_challenge_status(api_url: &str) -> Result<ChallengeResponse, String> {
+    let url = format!("{}/challenge", api_url);
+
+    let client = reqwest::blocking::Client::new();
+    let response = client.get(url).send().map_err(|e| format!("API request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Challenge API returned non-success status: {}", response.status()));
+    }
+
+    let challenge_response: ChallengeResponse = response.json().map_err(|e| format!("JSON parsing failed: {}", e))?;
+    Ok(challenge_response)
+}
+
+/// Fetches and validates the active challenge parameters, returning data only if active.
+// RENAMED from fetch_challenge
+pub fn get_active_challenge_data(api_url: &str) -> Result<ChallengeData, String> {
+    let challenge_response = fetch_challenge_status(api_url)?;
+
+    match challenge_response.code.as_str() {
+        "active" => {
+            // Unwrap is safe because 'challenge' should be present when code is "active"
+            Ok(challenge_response.challenge.unwrap())
+        }
+        "before" => {
+            let start_time = challenge_response.starts_at.unwrap_or_default();
+            Err(format!("MINING IS NOT YET ACTIVE. Starts at: {}", start_time))
+        }
+        "after" => {
+            Err("MINING PERIOD HAS ENDED.".to_string())
+        }
+        _ => {
+            Err(format!("Received unexpected challenge code: {}", challenge_response.code))
         }
     }
 }
