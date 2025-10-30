@@ -1,11 +1,9 @@
+mod api;
+mod cli;
+mod constants;
+
 use shadow_harvester_lib::scavenge;
 use clap::Parser;
-use reqwest;
-
-// Declare the new API module
-mod api;
-// Declare the CLI module
-mod cli;
 use cli::{Cli, Commands};
 
 fn main() {
@@ -112,6 +110,7 @@ fn main() {
             &challenge_params.challenge_id,
             &nonce,
         ) {
+            // FIX: The detailed error string from the API is now printed here.
             eprintln!("FATAL ERROR: Solution submission failed. Details: {}", e);
             return;
         }
