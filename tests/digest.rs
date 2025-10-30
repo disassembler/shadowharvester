@@ -261,10 +261,10 @@ mod rom_integration_tests {
         // --- Step 1: Check initial state ---
         // (Optional: Assert state.offsets_bs or state.offsets_diff against known values)
 
-        let _chunk_i0 = step_debug(&mut state);
-        let _chunk_i1 = step_debug(&mut state);
-        let _chunk_i2 = step_debug(&mut state);
-        let _chunk_i3 = step_debug(&mut state);
+        let chunk_i0 = step_debug(&mut state);
+        let chunk_i1 = step_debug(&mut state);
+        let chunk_i2 = step_debug(&mut state);
+        let chunk_i3 = step_debug(&mut state);
 
         let expected_chunk_i0 = hex::decode(EXPECTED_CHUNK_I0_HEX).expect("Invalid I0 Hex");
         let expected_chunk_i0_array: [u8; 64] = expected_chunk_i0.as_slice().try_into().unwrap();

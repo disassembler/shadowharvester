@@ -6,6 +6,14 @@ use cryptoxide::{
     kdf::argon2,
 };
 
+// ** Fixed Imports for Scavenge Logic **
+use std::sync::mpsc::{Sender, channel};
+use std::{sync::Arc, thread, time::SystemTime};
+use std::sync::atomic::{AtomicBool, Ordering};
+use indicatif::{ProgressBar, ProgressStyle};
+use hex;
+// ************************************
+
 // 1 byte operator
 // 3 bytes operands (src1, src2, dst)
 // 28 bytes data
@@ -399,6 +407,252 @@ pub fn hash(salt: &[u8], rom: &Rom, nb_loops: u32, nb_instrs: u32) -> [u8; 64] {
         vm.execute(rom, nb_instrs);
     }
     vm.finalize()
+}
+
+pub fn hash_structure_good(hash: &[u8], zero_bits: usize) -> bool {
+    let full_bytes = zero_bits / 8; // Number of full zero bytes
+    let remaining_bits = zero_bits % 8; // Bits to check in the next byte
+
+    // Check full zero bytes
+    if hash.len() < full_bytes || hash[..full_bytes].iter().any(|&b| b != 0) {
+        return false;
+    }
+
+    if remaining_bits == 0 {
+        return true;
+    }
+    if hash.len() > full_bytes {
+        // Mask for the most significant bits
+        let mask = 0xFF << (8 - remaining_bits);
+        hash[full_bytes] & mask == 0
+    } else {
+        false
+    }
+}
+
+
+// --------------------------------------------------------------------------
+// SCAVENGE LOGIC
+// --------------------------------------------------------------------------
+
+pub struct Thread {}
+
+// Structure to hold dynamic challenge parameters from the API
+#[derive(Clone)]
+pub struct ChallengeParams {
+    pub rom_key: String, // no_pre_mine hex string (used for ROM init)
+    pub difficulty_mask: String, // difficulty hex string (used for submission check)
+    pub address: String, // Registered Cardano address
+    pub challenge_id: String,
+    pub latest_submission: String,
+    pub no_pre_mine_hour: String,
+    pub required_zero_bits: usize, // Derived from difficulty_mask
+    pub rom: Arc<Rom>,
+}
+
+#[derive(Clone)]
+pub enum Result {
+    Progress(usize),
+    Found(u64), // We search for the 64-bit nonce value
+}
+
+// Helper to build the preimage string as specified in the API documentation
+pub fn build_preimage(
+    nonce: u64,
+    address: &str,
+    challenge_id: &str,
+    difficulty: &str,
+    no_pre_mine: &str,
+    latest_submission: &str,
+    no_pre_mine_hour: &str,
+) -> String {
+    let nonce_hex = format!("{:016x}", nonce);
+    let mut preimage = String::new();
+    preimage.push_str(&nonce_hex);
+    preimage.push_str(address);
+    preimage.push_str(challenge_id);
+    preimage.push_str(difficulty);
+    preimage.push_str(no_pre_mine);
+    preimage.push_str(latest_submission);
+    preimage.push_str(no_pre_mine_hour);
+    preimage
+}
+
+// Utility function to convert difficulty mask (e.g., "000FFFFF") to number of required zero bits
+fn difficulty_to_zero_bits(difficulty_hex: &str) -> usize {
+    let difficulty_bytes = hex::decode(difficulty_hex).unwrap();
+    let mut zero_bits = 0;
+    for &byte in difficulty_bytes.iter() {
+        if byte == 0x00 {
+            zero_bits += 8;
+        } else {
+            zero_bits += byte.leading_zeros() as usize;
+            break;
+        }
+    }
+    zero_bits
+}
+
+// The worker thread function
+fn spin(params: ChallengeParams, sender: Sender<Result>, stop_signal: Arc<AtomicBool>, start_nonce: u64, step_size: u64) {
+    let mut nonce_value = start_nonce;
+    const CHUNKS_SIZE: usize = 0xff;
+    const NB_LOOPS: u32 = 8;
+    const NB_INSTRS: u32 = 256;
+
+    let my_address = &params.address;
+
+    while !stop_signal.load(Ordering::Relaxed) {
+        let preimage_string = build_preimage(
+            nonce_value,
+            my_address,
+            &params.challenge_id,
+            &params.difficulty_mask,
+            &params.rom_key,
+            &params.latest_submission,
+            &params.no_pre_mine_hour,
+        );
+        let preimage_bytes = preimage_string.as_bytes();
+        let h = hash(preimage_bytes, &params.rom, NB_LOOPS, NB_INSTRS);
+
+        if hash_structure_good(&h, params.required_zero_bits) {
+            if sender.send(Result::Found(nonce_value)).is_ok() {
+                // Sent the found nonce
+            }
+            return;
+        }
+
+        if nonce_value & (CHUNKS_SIZE as u64) == 0 {
+            if sender.send(Result::Progress(CHUNKS_SIZE)).is_err() {
+                 return;
+            }
+        }
+
+        // Increment nonce by the thread step size
+        nonce_value = nonce_value.wrapping_add(step_size);
+    }
+}
+
+// The main orchestration function
+pub fn scavenge(
+    my_registered_address: String,
+    challenge_id: String,
+    difficulty: String,
+    no_pre_mine_key: String,
+    latest_submission: String,
+    no_pre_mine_hour: String,
+    nb_threads: u32,
+) {
+    const MB: usize = 1024 * 1024;
+    const GB: usize = 1024 * MB;
+
+    let required_zero_bits = difficulty_to_zero_bits(&difficulty);
+    println!("Required Zero Bits (Difficulty: {}): {}", difficulty, required_zero_bits);
+
+    let nb_threads_u64 = nb_threads as u64;
+    let step_size = nb_threads_u64;
+
+    thread::scope(|s| {
+        println!("Generating ROM with key: {}", no_pre_mine_key);
+
+        let rom = Rom::new(
+            no_pre_mine_key.as_bytes(),
+            RomGenerationType::TwoStep {
+                pre_size: 16 * MB,
+                mixing_numbers: 4,
+            },
+            1 * GB,
+        );
+        println!("{}", rom.digest);
+
+        let (sender, receiver) = channel();
+        let stop_signal = Arc::new(AtomicBool::new(false));
+
+        let common_params = ChallengeParams {
+            rom_key: no_pre_mine_key.clone(),
+            difficulty_mask: difficulty.clone(),
+            address: my_registered_address.clone(),
+            challenge_id: challenge_id.clone(),
+            latest_submission: latest_submission.clone(),
+            no_pre_mine_hour: no_pre_mine_hour.clone(),
+            required_zero_bits,
+            rom: Arc::new(rom),
+        };
+
+        for thread_id in 0..nb_threads_u64 {
+            let params = common_params.clone();
+            let sender = sender.clone();
+            let stop_signal = stop_signal.clone();
+
+            // Set start_nonce = thread_id
+            let start_nonce = thread_id;
+
+            println!("Starting thread {} with initial nonce: {:016x} and step size: {}", thread_id, start_nonce, step_size);
+
+            s.spawn(move || {
+                spin(params, sender, stop_signal, start_nonce, step_size)
+            });
+        }
+
+        // Drop the extra sender handle in the main thread to ensure the receiver loop terminates
+        drop(sender);
+
+        let start_loop = SystemTime::now();
+        let mut pos = 0;
+        let pb = ProgressBar::new(u64::MAX);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} {pos}/{len} [{elapsed_precise}] {bar:40.cyan/blue} {msg}",
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
+
+        let mut found = Vec::new();
+        let mut should_stop_after_found = false;
+
+        // Use a loop that waits for channel messages until all senders are dropped
+        while let Ok(r) = receiver.recv() {
+            match r {
+                Result::Progress(sz) => {
+                    if should_stop_after_found {
+                        // Ignore progress messages if we've already found a solution and are waiting for threads to exit.
+                        continue;
+                    }
+
+                    pos += sz as u64;
+                    pb.set_position(pos);
+                    let elapsed = start_loop.elapsed().unwrap().as_secs_f64();
+                    let current_speed = (pos as f64) / elapsed;
+
+                    pb.set_message(format!(
+                        "Speed: {:.2} hash/s found: {}",
+                        current_speed,
+                        found.len()
+                    ));
+                }
+                Result::Found(nonce) => {
+                    let nonce_hex = format!("{:016x}", nonce);
+                    println!("\nFound valid nonce: {}", nonce_hex);
+                    found.push(nonce);
+
+                    // 🚨 Signal all worker threads to stop gracefully
+                    stop_signal.store(true, Ordering::Relaxed);
+                    should_stop_after_found = true;
+                    // The loop continues, draining any remaining messages before recv() returns Err(RecvError::Disconnected)
+                }
+            }
+        }
+
+        // Final message after the mining stops (channel disconnects)
+        if !found.is_empty() {
+            // FIX: Bind the String to a variable before passing it to avoid E0716
+            let msg = format!("Scavenging complete. Found {} solutions.", found.len());
+            pb.finish_with_message(msg);
+        } else {
+             pb.abandon_with_message("Scavenging stopped.");
+        }
+    });
 }
 
 #[cfg(test)]
