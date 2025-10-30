@@ -18,7 +18,7 @@ pub struct Cli {
 
     /// Registered Cardano address to submit solutions for.
     #[arg(long)]
-    pub address: String,
+    pub address: Option<String>,
 
     /// Number of worker threads to use for mining.
     #[arg(long, default_value_t = 24)]

@@ -10,7 +10,7 @@ use pallas::{
 
 use rand_core::{OsRng};
 
-type KeyPairAndAddress = (SecretKey, PublicKey, ShelleyAddress);
+type KeyPairAndAddress = (SecretKey, PublicKey, String, String);
 
 pub fn generate_cardano_key_and_address() -> KeyPairAndAddress {
     let rng = OsRng;
@@ -25,6 +25,7 @@ pub fn generate_cardano_key_and_address() -> KeyPairAndAddress {
         ShelleyDelegationPart::Null
     );
 
-    (pay_sk, pay_vk, pay_addr)
+    (pay_sk, pay_vk, pay_addr.to_bech32().unwrap(), hex::encode(pay_vk.as_ref()))
+
 
 }

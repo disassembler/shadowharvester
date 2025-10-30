@@ -1,13 +1,16 @@
-// shadowharvester main()
-
-mod api;
-mod cardano;
-mod cli;
-mod constants;
-
-use cli::{Cli, Commands};
 use shadow_harvester_lib::scavenge;
 use clap::Parser;
+use reqwest;
+
+// Declare the new API module
+mod api;
+// Declare the CLI module
+mod cli;
+use cli::{Cli, Commands};
+// Declare the constants module
+mod constants;
+// Declare the cardano module
+mod cardano;
 
 /// Runs the main mining loop (scavenge) and submission for a single challenge.
 /// Returns true if mining should continue (only relevant for continuous mode).
@@ -44,7 +47,7 @@ fn run_single_mining_cycle(
         println!("🚀 Submission successful!");
 
         // 2. Handle donation if required
-        if let Some(destination_address) = donate_to_option {
+        if let Some(ref destination_address) = donate_to_option {
             if let Err(e) = api::donate_to(
                 api_url,
                 &mining_address,
@@ -63,17 +66,20 @@ fn run_single_mining_cycle(
 }
 
 /// Prints a detailed summary of the current challenge and mining setup.
+// FIX: Address now takes Option<&str>
 fn print_mining_setup(
     api_url: &str,
-    address: &str,
+    address: Option<&str>,
     threads: u32,
     challenge_params: &api::ChallengeData,
 ) {
+    let address_display = address.unwrap_or("[Not Set / Continuous Generation]");
+
     println!("\n==============================================");
     println!("⛏️  Shadow Harvester: Mining Cycle Setup");
     println!("==============================================");
     println!("API URL: {}", api_url);
-    println!("Mining Address: {}", address);
+    println!("Mining Address: {}", address_display);
     println!("Worker Threads: {}", threads);
     println!("----------------------------------------------");
     println!("CHALLENGE DETAILS:");
@@ -99,7 +105,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
     // --- COMMAND HANDLERS ---
 
     if let Some(Commands::Challenges) = cli.command {
-        // NEW: Handle Challenges command
+        // ... (Challenges command logic remains the same) ...
         println!("\n==============================================");
         println!("📝 Challenge Status Report");
         println!("==============================================");
@@ -139,6 +145,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
         return Ok(());
     }
 
+
     // 2. Fetch T&C message (always required for registration payload)
     let tc_response = api::fetch_tandc(&api_url)
         .map_err(|e| format!("Could not fetch T&C from API URL: {}. Details: {}", api_url, e))?;
@@ -154,39 +161,30 @@ fn run_app(cli: Cli) -> Result<(), String> {
     }
 
     // 4. Fetch Challenge Parameters (Needed for all subsequent operations)
-    // FIX: Using renamed function
     let challenge_params = api::get_active_challenge_data(&api_url)
         .map_err(|e| format!("Could not fetch active challenge: {}", e))?;
 
     // 5. Determine Operation Mode and Start Mining
 
-    // Default mode: display info and exit if no key/destination is provided
-    if cli.payment_key.is_none() && cli.donate_to.is_none() {
-        print_mining_setup(
-            &api_url,
-            &cli.address,
-            cli.threads,
-            &challenge_params
-        );
-        println!("MODE: INFO ONLY");
-        println!("----------------------------------------------");
-        println!("NOTE: No secret key or continuous donation target specified.");
-        println!("      Pass '--payment-key <HEX>' for a single run, or");
-        println!("      '--donate-to <ADDR>' for continuous mining with new keys.");
-        return Ok(());
-    }
-
-    // --- Pre-extract necessary fields as they are needed multiple times ---
-    let mining_address = cli.address.clone();
+    // --- Pre-extract necessary fields ---
+    let cli_address_option = cli.address.as_ref();
     let donate_to_option_ref = cli.donate_to.as_ref(); // Option<&String>
     let threads = cli.threads; // Copy
 
-    // --- MODE A: Single Run (Uses optional --payment-key or default address) ---
+    // --- Logic Check: Determine if we should mine and what address to use ---
+
+    // MODE A: Single Run (Triggered if payment_key is set OR if NO continuous mining requested)
     if cli.payment_key.is_some() || cli.donate_to.is_none() {
+
+        // REQUIREMENT: Address must be set for Single Run mode.
+        let mining_address = cli_address_option.map(String::from).ok_or_else(|| {
+            // If address is missing, give the user the guidance and terminate.
+            "Single Run mode requires the '--address' flag to be set.".to_string()
+        })?;
 
         print_mining_setup(
             &api_url,
-            &mining_address,
+            Some(mining_address.as_str()),
             threads,
             &challenge_params
         );
@@ -194,7 +192,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
 
         if run_single_mining_cycle(
             &api_url,
-            mining_address,
+            mining_address, // Pass ownership
             threads,
             donate_to_option_ref,
             &challenge_params
@@ -202,7 +200,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
             println!("\nSingle run complete.");
         }
 
-    // --- MODE B: Continuous Mining & Donation (Requires --donate-to) ---
+    // MODE B: Continuous Mining & Donation (Requires --donate-to)
     } else if cli.donate_to.is_some() {
 
         println!("\n==============================================");
@@ -211,28 +209,47 @@ fn run_app(cli: Cli) -> Result<(), String> {
         println!("Donation Target: {}", cli.donate_to.as_ref().unwrap());
 
         loop {
-            let generated_mining_address = cli.address.clone();
+            // 1. Generate New Key Pair for this cycle
+            let (_pay_sk, _pay_vk, generated_mining_address, _pub_key_hex) = cardano::generate_cardano_key_and_address();
 
-            print_mining_setup(
+            // 2. Registration (MOCK: Requires signing logic to be completed)
+            println!("\n[CYCLE START] Generated Address: {}", generated_mining_address);
+
+            /*
+            if let Err(e) = api::register_address(
                 &api_url,
                 &generated_mining_address,
+                &tc_response.message,
+                // NOTE: Signature and PubKey must be dynamically generated/signed!
+                constants::MOCK_SIGNATURE,
+                &pub_key_hex,
+            ) {
+                eprintln!("Registration failed: {}. Cannot start mining cycle.", e);
+                break;
+            }
+            */
+
+            // 3. Mining and Submission
+            print_mining_setup(
+                &api_url,
+                Some(generated_mining_address.as_str()),
                 threads,
                 &challenge_params
             );
 
-            println!("\n[CYCLE START] Mining with temporary address: {}", generated_mining_address);
-
             if !run_single_mining_cycle(
                 &api_url,
-                generated_mining_address,
+                generated_mining_address, // Pass ownership of the generated address
                 threads,
                 donate_to_option_ref,
                 &challenge_params
             ) {
+                // If mining or submission fails, break the continuous loop
                 eprintln!("Critical failure in cycle. Terminating continuous mining.");
                 break;
             }
 
+            // Wait before starting the next key generation cycle (MOCK: No actual wait implemented)
             println!("\n[CYCLE END] Starting next mining cycle immediately...");
         }
     }
