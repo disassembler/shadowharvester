@@ -5,12 +5,11 @@ use reqwest;
 use serde_json;
 
 // FIX: Import MOCK constants from the new module
-use crate::constants::{MOCK_PUBKEY, MOCK_SIGNATURE};
+use crate::constants::{MOCK_PUBKEY, MOCK_SIGNATURE, DONATE_MESSAGE_SIG}; // Added DONATE_MESSAGE_SIG for completeness
 
 // --- RESPONSE STRUCTS ---
-// ... (TandCResponse, RegistrationReceipt, ChallengeData, ChallengeResponse, SolutionReceipt, ApiErrorResponse structs remain the same)
+// ... (All structs remain the same)
 
-// Structs for API response deserialization
 #[derive(Debug, Deserialize)]
 pub struct TandCResponse {
     pub version: String,
@@ -49,6 +48,14 @@ struct SolutionReceipt {
 }
 
 #[derive(Debug, Deserialize)]
+struct DonateResponse {
+    pub status: String,
+    #[serde(rename = "donation_id")]
+    pub donation_id: String,
+}
+
+
+#[derive(Debug, Deserialize)]
 struct ApiErrorResponse {
     pub message: String,
     pub error: Option<String>,
@@ -71,17 +78,24 @@ pub fn fetch_tandc(api_url: &str) -> Result<TandCResponse, reqwest::Error> {
     response.json()
 }
 
-/// Performs a mock POST /register call using a fetched T&C message and placeholder key/signature data.
-pub fn register_address_mock(api_url: &str, address: &str, _tc_message: &str) -> Result<(), reqwest::Error> {
+/// Performs the POST /register call using key/signature arguments.
+// RENAMED from register_address_mock
+pub fn register_address(
+    api_url: &str,
+    address: &str,
+    _tc_message: &str,
+    signature: &str,
+    pubkey: &str,
+) -> Result<(), reqwest::Error> {
     let url = format!(
         "{}/register/{}/{}/{}",
         api_url,
         address,
-        MOCK_SIGNATURE, // Used from crate::constants
-        MOCK_PUBKEY     // Used from crate::constants
+        signature,
+        pubkey
     );
 
-    println!("-> Attempting mock registration for address: {}", address);
+    println!("-> Attempting address registration for address: {}", address);
 
     let client = reqwest::blocking::Client::new();
     let response = client
@@ -129,8 +143,8 @@ pub fn fetch_challenge(api_url: &str) -> Result<ChallengeData, String> {
     }
 }
 
-/// Performs a mock POST /solution call.
-pub fn submit_solution_mock(
+/// Performs the POST /solution call.
+pub fn submit_solution(
     api_url: &str,
     address: &str,
     challenge_id: &str,
@@ -162,7 +176,6 @@ pub fn submit_solution_mock(
         // Submission failed (4xx or 5xx)
         let body_text = response.text().unwrap_or_else(|_| format!("Could not read response body for status {}", status));
 
-        // Attempt to parse the body as an API error response for a detailed message
         let api_error: Result<ApiErrorResponse, _> = serde_json::from_str(&body_text);
 
         match api_error {
@@ -172,6 +185,52 @@ pub fn submit_solution_mock(
             }
             Err(_) => {
                 // API returned a non-structured error (e.g., plain text or unreadable JSON)
+                Err(format!("HTTP Error {} with unparseable body: {}", status.as_u16(), body_text))
+            }
+        }
+    }
+}
+
+/// Performs the POST /donate_to call.
+// RENAMED from donate_to_mock
+pub fn donate_to(
+    api_url: &str,
+    original_address: &str,
+    destination_address: &str,
+    donation_signature: &str,
+) -> Result<(), String> {
+
+    let url = format!(
+        "{}/donate_to/{}/{}/{}",
+        api_url,
+        destination_address,
+        original_address,
+        donation_signature
+    );
+
+    println!("-> Donating funds from {} to {}", original_address, destination_address);
+
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .post(url)
+        .header("Content-Type", "application/json; charset=utf-8")
+        .send().map_err(|e| format!("Network/Client Error: {}", e))?;
+
+    let status = response.status();
+
+    if status.is_success() {
+        let donation_response: DonateResponse = response.json().map_err(|e| format!("Failed to parse successful donation JSON: {}", e))?;
+        println!("✅ Donation successful. Donation ID: {}", donation_response.donation_id);
+        Ok(())
+    } else {
+        let body_text = response.text().unwrap_or_else(|_| format!("Could not read response body for status {}", status));
+        let api_error: Result<ApiErrorResponse, _> = serde_json::from_str(&body_text);
+
+        match api_error {
+            Ok(err) => {
+                Err(format!("Donation Failed (Status {}): {}", status.as_u16(), err.message))
+            }
+            Err(_) => {
                 Err(format!("HTTP Error {} with unparseable body: {}", status.as_u16(), body_text))
             }
         }

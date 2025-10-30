@@ -1,44 +1,83 @@
-mod api;
-mod cli;
-mod constants;
-
 use shadow_harvester_lib::scavenge;
 use clap::Parser;
+use reqwest;
+
+// Declare the new API module
+mod api;
+mod cardano;
+mod cli;
 use cli::{Cli, Commands};
+// Declare the constants module
+mod constants;
 
-fn main() {
-    let cli = Cli::parse();
+/// Runs the main mining loop (scavenge) and submission for a single challenge.
+/// Returns true if mining should continue (only relevant for continuous mode).
+// FIX: Updated signature to take individual, non-moved arguments (threads and donate_to are now explicit).
+fn run_single_mining_cycle(
+    api_url: &str,
+    mining_address: String,
+    threads: u32,
+    donate_to_option: Option<&String>,
+    challenge_params: &api::ChallengeData,
+) -> bool {
+    let found_nonce = scavenge(
+        mining_address.clone(),
+        challenge_params.challenge_id.clone(),
+        challenge_params.difficulty.clone(),
+        challenge_params.no_pre_mine_key.clone(),
+        challenge_params.latest_submission.clone(),
+        challenge_params.no_pre_mine_hour_str.clone(),
+        threads, // Use threads directly
+    );
 
-    // KeyGen handling (temporarily disabled)
-    match cli.command {
-        Some(Commands::KeyGen) => {
-             eprintln!("ERROR: The 'key-gen' command is temporarily disabled.");
-             return;
+    if let Some(nonce) = found_nonce {
+        println!("\n✅ Solution found: {}. Submitting...", nonce);
+
+        // 1. Submit solution
+        if let Err(e) = api::submit_solution(
+            api_url,
+            &mining_address,
+            &challenge_params.challenge_id,
+            &nonce,
+        ) {
+            eprintln!("FATAL ERROR: Solution submission failed. Details: {}", e);
+            return false;
         }
-        None => {} // Continue to mining setup
+        println!("🚀 Submission successful!");
+
+        // 2. Handle donation if required
+        if let Some(destination_address) = donate_to_option {
+            if let Err(e) = api::donate_to(
+                api_url,
+                &mining_address,
+                destination_address,
+                constants::DONATE_MESSAGE_SIG, // PASSING MOCK SIG
+            ) {
+                eprintln!("FATAL ERROR: Donation failed. Details: {}", e);
+                return false;
+            }
+        }
+        return true; // Single run successful, continue only if in continuous mode
+    } else {
+        println!("\n⚠️ Scavenging finished, but no solution was found.");
+        return false; // Cannot continue if no solution was found in this cycle
     }
+}
 
-
+/// Runs the main application logic based on CLI flags.
+fn run_app(cli: Cli) -> Result<(), String> {
     // 1. Check for --api-url
+    // NOTE: This move makes cli partially moved.
     let api_url: String = match cli.api_url {
         Some(url) => url,
         None => {
-            eprintln!("ERROR: The '--api-url' flag must be specified to connect to the Scavenger Mine API.");
-            eprintln!("Example: ./shadow-harvester --api-url https://scavenger.gd.midnighttge.io");
-            return;
+            return Err("The '--api-url' flag must be specified to connect to the Scavenger Mine API.".to_string());
         }
     };
-
-    // --- API FLOW STARTS HERE ---
 
     // 2. Fetch T&C message (always required for registration payload)
-    let tc_response = match api::fetch_tandc(&api_url) {
-        Ok(res) => res,
-        Err(e) => {
-            eprintln!("FATAL ERROR: Could not fetch T&C from API URL: {}. Details: {}", api_url, e);
-            return;
-        }
-    };
+    let tc_response = api::fetch_tandc(&api_url)
+        .map_err(|e| format!("Could not fetch T&C from API URL: {}. Details: {}", api_url, e))?;
 
     // 3. Conditional T&C display and acceptance check
     if !cli.accept_tos {
@@ -47,75 +86,110 @@ fn main() {
         println!("{}", tc_response.content);
         println!("--------------------------------------------------");
         println!("Agreement Message:\n'{}'", tc_response.message);
-        println!("--------------------------------------------------");
-
-        println!("\nERROR: You must pass the '--accept-tos' flag to proceed with mining.");
-        return;
+        return Err("You must pass the '--accept-tos' flag to proceed with mining.".to_string());
     }
 
-    // 4. Register the address (MOCK) - TEMPORARILY SKIPPED
-    println!("⏩ Skipping address registration for now.");
-    /*
-    if let Err(e) = api::register_address_mock(&api_url, &cli.address, &tc_response.message) {
-        eprintln!("FATAL ERROR: Address registration failed. Details: {}", e);
-        return;
+    // 4. Fetch Challenge Parameters (Needed for all subsequent operations)
+    let challenge_params = api::fetch_challenge(&api_url)
+        .map_err(|e| format!("Could not fetch active challenge: {}", e))?;
+
+    // 5. Determine Operation Mode and Start Mining
+
+    // Default mode: display info and exit if no key/destination is provided
+    if cli.payment_key.is_none() && cli.donate_to.is_none() {
+        println!("\n==============================================");
+        println!("⛏️  Shadow Harvester: INFO ONLY Mode");
+        println!("==============================================");
+        println!("Mining Address: {}", cli.address);
+        println!("Worker Threads: {}", cli.threads);
+        println!("CHALLENGE ID: {}", challenge_params.challenge_id);
+        println!("----------------------------------------------");
+        println!("NOTE: No secret key or continuous donation target specified.");
+        println!("      Pass '--payment-key <HEX>' for a single run, or");
+        println!("      '--donate-to <ADDR>' for continuous mining with new keys.");
+        return Ok(());
     }
-    */
 
-    // 5. Fetch Challenge Parameters
-    let challenge_params = match api::fetch_challenge(&api_url) {
-        Ok(params) => params,
-        Err(e) => {
-            // Print the custom error message and gracefully exit
-            eprintln!("ERROR: {}", e);
-            return;
-        }
-    };
+    // --- Pre-extract necessary fields as they are needed multiple times ---
+    let mining_address = cli.address.clone();
+    let donate_to_option_ref = cli.donate_to.as_ref(); // Option<&String>
+    let threads = cli.threads; // Copy
 
-    // --- MINING SETUP ---
+    // --- MODE A: Single Run (Uses optional --payment-key or default address) ---
+    if cli.payment_key.is_some() || cli.donate_to.is_none() {
 
-    println!("\n==============================================");
-    println!("⛏️  Shadow Harvester: Mining Started");
-    println!("==============================================");
-    println!("API URL: {}", api_url);
-    println!("Mining Address: {}", cli.address);
-    println!("Worker Threads: {}", cli.threads);
-    println!("----------------------------------------------");
-    println!("CHALLENGE DETAILS:");
-    println!("  ID:               {}", challenge_params.challenge_id);
-    println!("  Difficulty Mask:  {}", challenge_params.difficulty);
-    println!("  Submission Deadline: {}", challenge_params.latest_submission);
-    println!("  ROM Key (no_pre_mine): {}", challenge_params.no_pre_mine_key);
-    println!("  Hash Input Hour:  {}", challenge_params.no_pre_mine_hour_str);
-    println!("----------------------------------------------");
+        println!("\n==============================================");
+        println!("⛏️  Shadow Harvester: SINGLE RUN Mode");
+        println!("==============================================");
+        println!("Mining Address: {}", mining_address);
+        println!("Worker Threads: {}", threads);
+        println!("CHALLENGE ID: {}", challenge_params.challenge_id);
+        println!("----------------------------------------------");
 
-    // 6. Start Scavenging (Using dynamic challenge data)
+        // Note: Registration logic is still mock/skipped here as per previous steps.
 
-    let found_nonce = scavenge(
-        cli.address.clone(),
-        challenge_params.challenge_id.clone(),
-        challenge_params.difficulty.clone(),
-        challenge_params.no_pre_mine_key.clone(),
-        challenge_params.latest_submission.clone(),
-        challenge_params.no_pre_mine_hour_str.clone(),
-        cli.threads,
-    );
-
-    // 7. Submit solution if found
-    if let Some(nonce) = found_nonce {
-        println!("\n✅ Solution found: {}. Submitting...", nonce);
-        if let Err(e) = api::submit_solution_mock(
+        if run_single_mining_cycle(
             &api_url,
-            &cli.address,
-            &challenge_params.challenge_id,
-            &nonce,
+            mining_address,
+            threads,
+            donate_to_option_ref,
+            &challenge_params
         ) {
-            // FIX: The detailed error string from the API is now printed here.
-            eprintln!("FATAL ERROR: Solution submission failed. Details: {}", e);
-            return;
+            println!("\nSingle run complete.");
         }
-        println!("🚀 Submission successful!");
-    } else {
-        println!("\n⚠️ Scavenging finished, but no solution was found.");
+
+    // --- MODE B: Continuous Mining & Donation (Requires --donate-to) ---
+    } else if cli.donate_to.is_some() {
+        // Continuous mode: Generate new key, register, mine, donate. Loop indefinitely.
+
+        println!("\n==============================================");
+        println!("⛏️  Shadow Harvester: CONTINUOUS MINING Mode");
+        println!("==============================================");
+        println!("Donation Target: {}", cli.donate_to.as_ref().unwrap());
+        println!("Worker Threads: {}", threads);
+        println!("CHALLENGE ID: {}", challenge_params.challenge_id);
+        println!("----------------------------------------------");
+
+        loop {
+            // NOTE: In a real implementation, you would call cardano::generate_new_key() here,
+            // register the new address, and then mine with it.
+            let generated_mining_address = cli.address.clone();
+
+            println!("\n[CYCLE START] Mining with temporary address: {}", generated_mining_address);
+
+            if !run_single_mining_cycle(
+                &api_url,
+                generated_mining_address,
+                threads,
+                donate_to_option_ref,
+                &challenge_params
+            ) {
+                // If mining or submission fails, break the continuous loop
+                eprintln!("Critical failure in cycle. Terminating continuous mining.");
+                break;
+            }
+
+            // Wait before starting the next key generation cycle (MOCK: No actual wait implemented)
+            println!("\n[CYCLE END] Starting next mining cycle immediately...");
+        }
+    }
+
+    Ok(())
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    if let Some(Commands::KeyGen) = cli.command {
+        cardano::generate_cardano_key_and_address();
+        return;
+    }
+
+    match run_app(cli) {
+        Ok(_) => {},
+        Err(e) => {
+            eprintln!("FATAL ERROR: {}", e);
+            std::process::exit(1);
+        }
     }
 }

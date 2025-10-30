@@ -1,14 +1,11 @@
 // shadowharvester/src/cardano.rs
 
-use pallas_addresses::{Address, Network, ShelleyAddress, ShelleyPaymentPart, ShelleyDelegationPart};
-use pallas_crypto::key::ed25519::{SecretKey, PublicKey};
-// FIX 1: Import the VerificationKey trait (provides .hash())
-// FIX 2: Import the ToBytes trait (provides .to_bytes())
-use pallas_crypto::key::VerificationKey;
-use pallas_crypto::key::ToBytes;
-use pallas_crypto::hash::Hash;
+use pallas_addresses::{Address, Network, ShelleyAddress, ShelleyPaymentPart, ShelleyDelegationPart, Hash};
+use pallas_crypto::key::ed25519::*;
+use pallas_crypto::hash::hash::Hash;
+use pallas_configs::byron::network_magic::NetworkMagic;
+
 use rand_core::{OsRng, RngCore};
-use hex;
 
 
 /// Generates a Cardano key pair and prints the secret key, public key, and payment address.
@@ -19,17 +16,15 @@ pub fn generate_cardano_key_and_address() {
     let mut rng = OsRng;
 
     // Generate Ed25519 SecretKey
-    let sk = SecretKey::new(&mut rng);
-
-    // Use public_key()
-    let vk = sk.public_key();
-
-    // FIX 1 & 2: Use the hash() method. The Hash type is now imported.
-    // vk.hash() returns Hash<28>, which satisfies the constraints of ShelleyPaymentPart::Key
-    let vk_hash: Hash<28> = vk.hash();
+    let pay_sk = SecretKey::new(&mut rng);
+    let pay_vk = pay_sk.public_key();
+    let pay_cred = pay_vk.to_address_payload();
+    let stake_sk = SecretKey::new(&mut rng);
+    let stake_vk = stake_sk.public_key();
+    let stake_cred = stake_vk.to_address_payload();
 
     // Construct the Shelley Base Address parts (Testnet is used here)
-    let payment_part = ShelleyPaymentPart::Key(vk_hash);
+    let payment_part = vk.to_address_payload();
     let delegation_part = ShelleyDelegationPart::Key(vk_hash);
 
     let shelley_address = ShelleyAddress::new(
