@@ -24,7 +24,7 @@ enum MiningResult {
 }
 
 
-// NEW HELPER FUNCTION: Polls for challenge updates and handles waiting periods
+// MODIFIED HELPER FUNCTION: Polls for challenge updates and handles waiting periods
 fn poll_for_active_challenge(
     api_url: &str,
     current_id: &mut String, // Mutate the current ID to track changes
@@ -42,11 +42,16 @@ fn poll_for_active_challenge(
                 println!("\n🎉 New active challenge detected (ID: {}). Starting new cycle.", active_params.challenge_id);
                 // Update the current_id
                 *current_id = active_params.challenge_id.clone();
+                // Return the new challenge to start mining immediately.
                 Ok(Some(active_params))
             } else {
-                // Same challenge, still active. Return it to allow the inner mining loop to run/continue.
-                println!("\nℹ️ Challenge ID ({}) remains active. Resuming search or waiting...", active_params.challenge_id);
-                Ok(Some(active_params))
+                // Same challenge, still active (meaning we previously solved it or failed to find it).
+                // Enforce a 5-minute wait, then return None to re-poll.
+                println!("\nℹ️ Challenge ID ({}) remains active/solved. Waiting 5 minutes for a new challenge...", active_params.challenge_id);
+                thread::sleep(Duration::from_secs(5 * 60));
+
+                // Return None, telling the outer loop to just restart polling.
+                Ok(None)
             }
         }
         "before" => {
@@ -246,11 +251,12 @@ fn run_app(cli: Cli) -> Result<(), String> {
 
         // Outer Polling loop (robustly checks for challenge changes every 5 minutes)
         loop {
-            // Poll for a new/active challenge
+            // Poll for a new/active challenge. This function handles the 5-minute wait
+            // if the challenge is inactive OR if the same active ID is detected.
             let challenge_params = match poll_for_active_challenge(&api_url, &mut current_challenge_id) {
                 Ok(Some(params)) => params,
                 Ok(None) => {
-                    // poll_for_active_challenge handles the sleep if not active/no change
+                    // Loop continues to poll again after the sleep handled inside the function.
                     continue;
                 }
                 Err(e) => {
@@ -260,7 +266,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
                 }
             };
 
-            // New active challenge found or current one needs mining
+            // New active challenge found, start mining
             print_mining_setup(
                 &api_url,
                 Some(mining_address.as_str()),
@@ -270,7 +276,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
 
             // Inner mining/submission loop for robustness
             loop {
-                let result = run_single_mining_cycle( // MODIFIED: Capture result
+                let result = run_single_mining_cycle(
                     &api_url,
                     mining_address.clone(),
                     threads,
@@ -280,15 +286,10 @@ fn run_app(cli: Cli) -> Result<(), String> {
                 );
 
                 match result {
-                    MiningResult::FoundAndSubmitted => {
-                        println!("\n✅ Solution submitted successfully. Waiting 5 minutes before checking for a new challenge...");
-                        thread::sleep(Duration::from_secs(5 * 60));
-                        break; // Break the inner loop, go back to polling for new challenge.
-                    }
-                    MiningResult::AlreadySolved => { // NEW LOGIC for user request
-                        println!("\nℹ️ Challenge already solved by another harvester. Stopping current mining and polling for new challenge...");
-                        thread::sleep(Duration::from_secs(5)); // Short wait to avoid spamming the outer loop
-                        break; // Break the inner loop, go back to polling for new challenge.
+                    MiningResult::FoundAndSubmitted | MiningResult::AlreadySolved => {
+                        println!("\n✅ Solution submitted or challenge already solved. Stopping current mining.");
+                        // Break inner loop, outer loop restarts and poll_for_active_challenge will enforce the 5-minute wait.
+                        break;
                     }
                     MiningResult::MiningFailed => {
                         // Mining/Submission failed (e.g., hash not found in time, general API error)
@@ -309,7 +310,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
                         }
                     }
                 }
-            }
+            } // END of Inner Loop
         }
     }
 
