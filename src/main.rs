@@ -468,6 +468,8 @@ fn run_app(cli: Cli) -> Result<(), String> {
                 }
             }
 
+            let stats_result = api::fetch_statistics(&client, &api_url, &generated_mining_address);
+            print_statistics(stats_result, final_hashes, final_elapsed);
             // In this mode, we just start the next cycle with a new key immediately.
             println!("\n[CYCLE END] Starting next mining cycle immediately...");
         }
