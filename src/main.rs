@@ -1,6 +1,8 @@
 use shadow_harvester_lib::scavenge;
 use clap::Parser;
 use reqwest;
+use std::thread;
+use std::time::Duration;
 
 // Declare the new API module
 mod api;
@@ -13,17 +15,70 @@ mod constants;
 mod cardano;
 use cardano::KeyPairAndAddress; // Import the tuple type
 
+// NEW: Define a result type for the mining cycle
+#[derive(Debug, PartialEq)]
+enum MiningResult {
+    FoundAndSubmitted,
+    AlreadySolved, // The solution was successfully submitted by someone else
+    MiningFailed,  // General mining or submission error (e.g., hash not found, transient API error)
+}
+
+
+// NEW HELPER FUNCTION: Polls for challenge updates and handles waiting periods
+fn poll_for_active_challenge(
+    api_url: &str,
+    current_id: &mut String, // Mutate the current ID to track changes
+) -> Result<Option<api::ChallengeData>, String> {
+
+    // Poll the overall status first
+    let challenge_response = api::fetch_challenge_status(api_url)?;
+
+    match challenge_response.code.as_str() {
+        "active" => {
+            let active_params = challenge_response.challenge.unwrap();
+
+            // Check if challenge ID has changed
+            if active_params.challenge_id != *current_id {
+                println!("\n🎉 New active challenge detected (ID: {}). Starting new cycle.", active_params.challenge_id);
+                // Update the current_id
+                *current_id = active_params.challenge_id.clone();
+                Ok(Some(active_params))
+            } else {
+                // Same challenge, still active. Return it to allow the inner mining loop to run/continue.
+                println!("\nℹ️ Challenge ID ({}) remains active. Resuming search or waiting...", active_params.challenge_id);
+                Ok(Some(active_params))
+            }
+        }
+        "before" => {
+            let start_time = challenge_response.starts_at.unwrap_or_default();
+            println!("\n⏳ MINING IS NOT YET ACTIVE. Starts at: {}. Waiting 5 minutes...", start_time);
+            *current_id = "".to_string(); // Reset ID
+            thread::sleep(Duration::from_secs(5 * 60));
+            Ok(None)
+        }
+        "after" => {
+            println!("\n🛑 MINING PERIOD HAS ENDED. Waiting 5 minutes for the next challenge...");
+            *current_id = "".to_string(); // Reset ID
+            thread::sleep(Duration::from_secs(5 * 60));
+            Ok(None)
+        }
+        _ => {
+            Err(format!("Received unexpected challenge code: {}", challenge_response.code))
+        }
+    }
+}
+
+
 /// Runs the main mining loop (scavenge) and submission for a single challenge.
-/// Returns true if mining should continue (only relevant for continuous mode).
+/// Returns a MiningResult indicating success, failure, or if the challenge was already solved.
 fn run_single_mining_cycle(
     api_url: &str,
     mining_address: String,
     threads: u32,
     donate_to_option: Option<&String>,
     challenge_params: &api::ChallengeData,
-    // NEW: Secret key is passed for dynamic donation signing
     keypair: &cardano::KeyPairAndAddress,
-) -> bool {
+) -> MiningResult { // MODIFIED return type
     let found_nonce = scavenge(
         mining_address.clone(),
         challenge_params.challenge_id.clone(),
@@ -31,7 +86,7 @@ fn run_single_mining_cycle(
         challenge_params.no_pre_mine_key.clone(),
         challenge_params.latest_submission.clone(),
         challenge_params.no_pre_mine_hour_str.clone(),
-        threads, // Use threads directly
+        threads,
     );
 
     if let Some(nonce) = found_nonce {
@@ -44,8 +99,15 @@ fn run_single_mining_cycle(
             &challenge_params.challenge_id,
             &nonce,
         ) {
-            eprintln!("FATAL ERROR: Solution submission failed. Details: {}", e);
-            return false;
+            eprintln!("⚠️ Solution submission failed. Details: {}", e);
+
+            // Check for the specific "already solved" error
+            if e.contains("Solution already exists") {
+                return MiningResult::AlreadySolved;
+            }
+
+            // Treat other submission errors as general failure
+            return MiningResult::MiningFailed;
         }
         println!("🚀 Submission successful!");
 
@@ -60,16 +122,15 @@ fn run_single_mining_cycle(
                 api_url,
                 &mining_address,
                 destination_address,
-                &donation_signature.0, // Dynamic Signature
+                &donation_signature.0,
             ) {
-                eprintln!("FATAL ERROR: Donation failed. Details: {}", e);
-                return false;
+                eprintln!("⚠️ Donation failed. Details: {}", e);
             }
         }
-        return true; // Single run successful, continue only if in continuous mode
+        return MiningResult::FoundAndSubmitted; // Single run successful
     } else {
         println!("\n⚠️ Scavenging finished, but no solution was found.");
-        return false; // Cannot continue if no solution was found in this cycle
+        return MiningResult::MiningFailed; // Nonce not found is a general failure
     }
 }
 
@@ -110,59 +171,62 @@ fn run_app(cli: Cli) -> Result<(), String> {
     };
 
     // --- COMMAND HANDLERS ---
-
     if let Some(Commands::Challenges) = cli.command {
-        // ... (Challenge Status logic remains the same) ...
         let challenge_response = api::fetch_challenge_status(&api_url)
             .map_err(|e| format!("Could not fetch challenge status: {}", e))?;
-        // ... (Printing logic removed for brevity) ...
+        println!("Challenge status fetched: {:?}", challenge_response);
         return Ok(());
     }
 
-
     // 2. Fetch T&C message (always required for registration payload)
-    let tc_response = api::fetch_tandc(&api_url)
-        .map_err(|e| format!("Could not fetch T&C from API URL: {}. Details: {}", api_url, e))?;
+    let tc_response = match api::fetch_tandc(&api_url) {
+        Ok(t) => t,
+        Err(e) => return Err(format!("Could not fetch T&C from API URL: {}. Details: {}", api_url, e)),
+    };
 
     // 3. Conditional T&C display and acceptance check
     if !cli.accept_tos {
-        // ... (T&C display logic remains the same) ...
+        println!("Terms and Conditions (Version {}):", tc_response.version);
+        println!("{}", tc_response.content);
         return Err("You must pass the '--accept-tos' flag to proceed with mining.".to_string());
     }
 
-    // 4. Fetch Challenge Parameters (Needed for all subsequent operations)
-    let challenge_params = api::get_active_challenge_data(&api_url)
-        .map_err(|e| format!("Could not fetch active challenge: {}", e))?;
+    // --- Pre-extract necessary fields ---
+    let donate_to_option_ref = cli.donate_to.as_ref();
+    let threads = cli.threads;
+
+    // 4. Default mode: display info and exit
+    if cli.payment_key.is_none() && cli.donate_to.is_none() {
+        // Fetch challenge for info display
+        match api::get_active_challenge_data(&api_url) {
+            Ok(challenge_params) => {
+                 print_mining_setup(
+                    &api_url,
+                    cli.address.as_deref(),
+                    threads,
+                    &challenge_params
+                );
+            },
+            Err(e) => eprintln!("Could not fetch active challenge for info display: {}", e),
+        };
+        println!("MODE: INFO ONLY. Provide '--payment-key' or '--donate-to' to begin mining.");
+        return Ok(())
+    }
 
     // 5. Determine Operation Mode and Start Mining
 
-    // --- Pre-extract necessary fields ---
-    let cli_address_option = cli.address.as_ref();
-    let donate_to_option_ref = cli.donate_to.as_ref(); // Option<&String>
-    let threads = cli.threads; // Copy
+    // --- MODE A: Persistent Key Continuous Mining (User's request) ---
+    if let Some(skey_hex) = cli.payment_key.as_ref() {
 
-    // Default mode: display info and exit if no key/destination is provided
-    if cli.payment_key.is_none() && cli.donate_to.is_none() {
-        // ... (INFO ONLY logic remains the same) ...
-        return Ok(());
-    }
-
-    // --- MODE A: Single Run (Uses optional --payment-key or default address) ---
-    if cli.payment_key.is_some() || cli.donate_to.is_none() {
-
-        let mining_address = cli_address_option.map(String::from).ok_or_else(|| {
-            "Single Run mode requires the '--address' flag to be set.".to_string()
-        })?;
-
-        // 1. Key Generation/Loading
-        let key_pair = cardano::generate_cardano_key_and_address();
+        // Key Generation/Loading (Fatal if key is invalid)
+        let key_pair = cardano::generate_cardano_key_pair_from_skey(skey_hex);
         let mining_address = key_pair.2.to_bech32().unwrap();
-
-        // 2. Registration (Dynamic Signature)
         let reg_message = tc_response.message.clone();
-        let reg_signature = cardano::cip8_sign(&key_pair, &reg_message);
 
-        println!("\n[REGISTRATION] Attempting registration for address: {}", mining_address);
+        println!("\n[REGISTRATION] Attempting initial registration for address: {}", mining_address);
+
+        // Initial Registration (Fatal if first registration fails)
+        let reg_signature = cardano::cip8_sign(&key_pair, &reg_message);
         if let Err(e) = api::register_address(
             &api_url,
             &mining_address,
@@ -170,38 +234,105 @@ fn run_app(cli: Cli) -> Result<(), String> {
             &reg_signature.0,
             &hex::encode(&key_pair.1.as_ref()),
         ) {
-            eprintln!("Address registration failed: {}. Cannot start mining cycle.", e);
+            eprintln!("Address registration failed: {}. Cannot start mining.", e);
             return Err("Address registration failed.".to_string());
         }
 
-        print_mining_setup(
-            &api_url,
-            Some(mining_address.as_str()),
-            threads,
-            &challenge_params
-        );
-        println!("MODE: SINGLE RUN");
+        println!("\n==============================================");
+        println!("⛏️  Shadow Harvester: PERSISTENT KEY CONTINUOUS MINING Mode");
+        println!("==============================================");
 
-        if run_single_mining_cycle(
-            &api_url,
-            mining_address,
-            threads,
-            donate_to_option_ref,
-            &challenge_params,
-            &key_pair,
-        ) {
-            println!("\nSingle run complete.");
+        let mut current_challenge_id = String::new();
+
+        // Outer Polling loop (robustly checks for challenge changes every 5 minutes)
+        loop {
+            // Poll for a new/active challenge
+            let challenge_params = match poll_for_active_challenge(&api_url, &mut current_challenge_id) {
+                Ok(Some(params)) => params,
+                Ok(None) => {
+                    // poll_for_active_challenge handles the sleep if not active/no change
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("⚠️ Critical API Error during challenge polling: {}. Retrying in 5 minutes...", e);
+                    thread::sleep(Duration::from_secs(5 * 60));
+                    continue;
+                }
+            };
+
+            // New active challenge found or current one needs mining
+            print_mining_setup(
+                &api_url,
+                Some(mining_address.as_str()),
+                threads,
+                &challenge_params
+            );
+
+            // Inner mining/submission loop for robustness
+            loop {
+                let result = run_single_mining_cycle( // MODIFIED: Capture result
+                    &api_url,
+                    mining_address.clone(),
+                    threads,
+                    donate_to_option_ref,
+                    &challenge_params,
+                    &key_pair,
+                );
+
+                match result {
+                    MiningResult::FoundAndSubmitted => {
+                        println!("\n✅ Solution submitted successfully. Waiting 5 minutes before checking for a new challenge...");
+                        thread::sleep(Duration::from_secs(5 * 60));
+                        break; // Break the inner loop, go back to polling for new challenge.
+                    }
+                    MiningResult::AlreadySolved => { // NEW LOGIC for user request
+                        println!("\nℹ️ Challenge already solved by another harvester. Stopping current mining and polling for new challenge...");
+                        thread::sleep(Duration::from_secs(5)); // Short wait to avoid spamming the outer loop
+                        break; // Break the inner loop, go back to polling for new challenge.
+                    }
+                    MiningResult::MiningFailed => {
+                        // Mining/Submission failed (e.g., hash not found in time, general API error)
+                        eprintln!("\n⚠️ Mining cycle failed. Checking if challenge is still valid before retrying...");
+
+                        // Check if the challenge is still active and the same
+                        match api::get_active_challenge_data(&api_url) {
+                            Ok(active_params) if active_params.challenge_id == current_challenge_id => {
+                                eprintln!("Challenge is still valid. Retrying mining cycle in 1 minute...");
+                                thread::sleep(Duration::from_secs(60));
+                                // The inner loop continues to retry mining the same challenge
+                            },
+                            Ok(_) | Err(_) => {
+                                // Challenge either changed or ended, or we can't connect to API
+                                eprintln!("Challenge appears to have changed or API is unreachable. Stopping current mining and polling for new challenge...");
+                                break; // Break the inner loop, go back to polling for new challenge.
+                            }
+                        }
+                    }
+                }
+            }
         }
+    }
 
-    // --- MODE B: Continuous Mining & Donation (Requires --donate-to) ---
-    } else if cli.donate_to.is_some() {
+    // --- MODE B: Continuous Mining & Donation (New Key Gen, Old Mode B) ---
+    else if cli.donate_to.is_some() {
 
         println!("\n==============================================");
-        println!("⛏️  Shadow Harvester: CONTINUOUS MINING Mode");
+        println!("⛏️  Shadow Harvester: CONTINUOUS MINING (New Key Per Cycle) Mode");
         println!("==============================================");
         println!("Donation Target: {}", cli.donate_to.as_ref().unwrap());
 
+        // Continuous loop for generating a new key, registering, and mining
         loop {
+            // Robustly fetch active challenge data
+            let challenge_params = match api::get_active_challenge_data(&api_url) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("⚠️ Could not fetch active challenge (New Key Mode): {}. Retrying in 5 minutes...", e);
+                    thread::sleep(Duration::from_secs(5 * 60));
+                    continue;
+                }
+            };
+
             // 1. Generate New Key Pair for this cycle
             let key_pair = cardano::generate_cardano_key_and_address();
             let generated_mining_address = key_pair.2.to_bech32().unwrap();
@@ -219,8 +350,9 @@ fn run_app(cli: Cli) -> Result<(), String> {
                 &reg_signature.0,
                 &hex::encode(&key_pair.1.as_ref()),
             ) {
-                eprintln!("Registration failed: {}. Cannot start mining cycle.", e);
-                break;
+                eprintln!("Registration failed: {}. Retrying in 5 minutes...", e);
+                thread::sleep(Duration::from_secs(5 * 60));
+                continue;
             }
 
             // 3. Mining and Submission
@@ -231,25 +363,35 @@ fn run_app(cli: Cli) -> Result<(), String> {
                 &challenge_params
             );
 
-            if !run_single_mining_cycle(
+            // Use the new MiningResult for robustness in this mode too
+            match run_single_mining_cycle(
                 &api_url,
-                generated_mining_address.to_string(), // Use ownership of the generated address
+                generated_mining_address.to_string(),
                 threads,
                 donate_to_option_ref,
                 &challenge_params,
                 &key_pair,
             ) {
-                // If mining or submission fails, break the continuous loop
-                eprintln!("Critical failure in cycle. Terminating continuous mining.");
-                break;
+                MiningResult::FoundAndSubmitted => {
+                    // Success, continue immediately with the next key generation cycle
+                }
+                MiningResult::AlreadySolved => {
+                    eprintln!("Solution was already accepted by the network. Starting next cycle immediately...");
+                    // No need to sleep 5 minutes, just start the next cycle immediately
+                }
+                MiningResult::MiningFailed => {
+                    eprintln!("Mining cycle failed. Retrying next cycle in 1 minute...");
+                    thread::sleep(Duration::from_secs(60));
+                }
             }
 
-            // Wait before starting the next key generation cycle (MOCK: No actual wait implemented)
+            // In this mode, we just start the next cycle with a new key immediately.
             println!("\n[CYCLE END] Starting next mining cycle immediately...");
         }
+    } else {
+        // This is unreachable because the `if/else if` chain covers all cases
+        Ok(())
     }
-
-    Ok(())
 }
 
 fn main() {

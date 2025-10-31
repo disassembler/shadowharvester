@@ -218,10 +218,11 @@ pub fn donate_to(
     );
 
     println!("-> Donating funds from {} to {}", original_address, destination_address);
+    println!("url: {}", &url);
 
     let client = reqwest::blocking::Client::new();
     let response = client
-        .post(url)
+        .post(&url)
         .header("Content-Type", "application/json; charset=utf-8")
         .send().map_err(|e| format!("Network/Client Error: {}", e))?;
 
