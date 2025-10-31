@@ -1,8 +1,12 @@
 use shadow_harvester_lib::scavenge;
 use clap::Parser;
 use reqwest;
+use reqwest::blocking;
 use std::thread;
 use std::time::Duration;
+use reqwest::blocking::Client;
+use crate::constants::USER_AGENT;
+use api::{ChallengeResponse, ChallengeData, Statistics};
 
 // Declare the new API module
 mod api;
@@ -23,15 +27,20 @@ enum MiningResult {
     MiningFailed,  // General mining or submission error (e.g., hash not found, transient API error)
 }
 
+fn create_api_client() -> Result<Client, reqwest::Error> {
+    Client::builder()
+        .user_agent(USER_AGENT) // Set the custom User-Agent
+        .build()
+}
 
-// MODIFIED HELPER FUNCTION: Polls for challenge updates and handles waiting periods
 fn poll_for_active_challenge(
+    client: &blocking::Client,
     api_url: &str,
     current_id: &mut String, // Mutate the current ID to track changes
 ) -> Result<Option<api::ChallengeData>, String> {
 
     // Poll the overall status first
-    let challenge_response = api::fetch_challenge_status(api_url)?;
+    let challenge_response = api::fetch_challenge_status(&client, api_url)?;
 
     match challenge_response.code.as_str() {
         "active" => {
@@ -73,10 +82,33 @@ fn poll_for_active_challenge(
     }
 }
 
+fn print_statistics(stats: Statistics) {
+    println!("\n==============================================");
+    println!("📈 Mining Statistics Summary");
+    println!("==============================================");
+
+    // --- LOCAL STATISTICS ---
+    println!("** YOUR LOCAL STATISTICS (Address: {}) **", stats.local_address);
+    println!("  Crypto Receipts (Solutions): {}", stats.crypto_receipts);
+    println!("  Night Allocation: {}", stats.night_allocation);
+    println!("----------------------------------------------");
+
+    // --- GLOBAL STATISTICS ---
+    println!("** GLOBAL STATISTICS (All Miners) **");
+    println!("  NOTE: These statistics are aggregated across all wallets globally.");
+    println!("  Total Wallets: {}", stats.wallets);
+    println!("  Current Challenges: {}", stats.challenges);
+    println!("  Total Challenges Ever: {}", stats.total_challenges);
+    println!("  Total Crypto Receipts: {}", stats.total_crypto_receipts);
+    println!("  Recent Crypto Receipts: {}", stats.recent_crypto_receipts);
+    println!("==============================================");
+}
+
 
 /// Runs the main mining loop (scavenge) and submission for a single challenge.
 /// Returns a MiningResult indicating success, failure, or if the challenge was already solved.
 fn run_single_mining_cycle(
+    client: &blocking::Client,
     api_url: &str,
     mining_address: String,
     threads: u32,
@@ -99,6 +131,7 @@ fn run_single_mining_cycle(
 
         // 1. Submit solution
         if let Err(e) = api::submit_solution(
+            &client,
             api_url,
             &mining_address,
             &challenge_params.challenge_id,
@@ -124,6 +157,7 @@ fn run_single_mining_cycle(
             let donation_signature = cardano::cip8_sign(keypair, &donation_message);
 
             if let Err(e) = api::donate_to(
+                &client,
                 api_url,
                 &mining_address,
                 destination_address,
@@ -175,16 +209,19 @@ fn run_app(cli: Cli) -> Result<(), String> {
         }
     };
 
+    let client = create_api_client()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
     // --- COMMAND HANDLERS ---
     if let Some(Commands::Challenges) = cli.command {
-        let challenge_response = api::fetch_challenge_status(&api_url)
+        let challenge_response = api::fetch_challenge_status(&client, &api_url)
             .map_err(|e| format!("Could not fetch challenge status: {}", e))?;
         println!("Challenge status fetched: {:?}", challenge_response);
         return Ok(());
     }
 
     // 2. Fetch T&C message (always required for registration payload)
-    let tc_response = match api::fetch_tandc(&api_url) {
+    let tc_response = match api::fetch_tandc(&client, &api_url) {
         Ok(t) => t,
         Err(e) => return Err(format!("Could not fetch T&C from API URL: {}. Details: {}", api_url, e)),
     };
@@ -203,7 +240,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
     // 4. Default mode: display info and exit
     if cli.payment_key.is_none() && cli.donate_to.is_none() {
         // Fetch challenge for info display
-        match api::get_active_challenge_data(&api_url) {
+        match api::get_active_challenge_data(&client, &api_url) {
             Ok(challenge_params) => {
                  print_mining_setup(
                     &api_url,
@@ -233,6 +270,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
         // Initial Registration (Fatal if first registration fails)
         let reg_signature = cardano::cip8_sign(&key_pair, &reg_message);
         if let Err(e) = api::register_address(
+            &client,
             &api_url,
             &mining_address,
             &tc_response.message,
@@ -253,7 +291,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
         loop {
             // Poll for a new/active challenge. This function handles the 5-minute wait
             // if the challenge is inactive OR if the same active ID is detected.
-            let challenge_params = match poll_for_active_challenge(&api_url, &mut current_challenge_id) {
+            let challenge_params = match poll_for_active_challenge(&client, &api_url, &mut current_challenge_id) {
                 Ok(Some(params)) => params,
                 Ok(None) => {
                     // Loop continues to poll again after the sleep handled inside the function.
@@ -277,6 +315,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
             // Inner mining/submission loop for robustness
             loop {
                 let result = run_single_mining_cycle(
+                    &client,
                     &api_url,
                     mining_address.clone(),
                     threads,
@@ -296,7 +335,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
                         eprintln!("\n⚠️ Mining cycle failed. Checking if challenge is still valid before retrying...");
 
                         // Check if the challenge is still active and the same
-                        match api::get_active_challenge_data(&api_url) {
+                        match api::get_active_challenge_data(&client,&api_url) {
                             Ok(active_params) if active_params.challenge_id == current_challenge_id => {
                                 eprintln!("Challenge is still valid. Retrying mining cycle in 1 minute...");
                                 thread::sleep(Duration::from_secs(60));
@@ -311,6 +350,10 @@ fn run_app(cli: Cli) -> Result<(), String> {
                     }
                 }
             } // END of Inner Loop
+            match api::fetch_statistics(&client, &api_url, &mining_address) {
+                Ok(stats) => print_statistics(stats),
+                Err(e) => eprintln!("⚠️ Failed to fetch final statistics: {}", e),
+            }
         }
     }
 
@@ -325,7 +368,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
         // Continuous loop for generating a new key, registering, and mining
         loop {
             // Robustly fetch active challenge data
-            let challenge_params = match api::get_active_challenge_data(&api_url) {
+            let challenge_params = match api::get_active_challenge_data(&client, &api_url) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("⚠️ Could not fetch active challenge (New Key Mode): {}. Retrying in 5 minutes...", e);
@@ -345,6 +388,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
             let reg_signature = cardano::cip8_sign(&key_pair, &reg_message);
 
             if let Err(e) = api::register_address(
+                &client,
                 &api_url,
                 &generated_mining_address,
                 &tc_response.message,
@@ -366,6 +410,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
 
             // Use the new MiningResult for robustness in this mode too
             match run_single_mining_cycle(
+                &client,
                 &api_url,
                 generated_mining_address.to_string(),
                 threads,
