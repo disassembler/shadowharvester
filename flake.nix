@@ -17,44 +17,11 @@
         "aarch64-darwin"
       ];
 
-      perSystem = { config, pkgs, ... }: let
-
-        naersk-lib = inputs.naersk.lib."${pkgs.system}";
-        shadowHarvester = naersk-lib.buildPackage {
-          pname = "shadow-harvester";
-          version = "0.1.0";
-
-          src = ./.;
-
-          buildInputs = with pkgs; [
-            pkg-config
-            openssl
-            zlib
-          ];
-        };
-
-      in {
-        packages = {
-          inherit shadowHarvester;
-          default = shadowHarvester;
-        };
-
-        devShells.default = with pkgs; mkShell {
-          packages = [
-            cargo
-            rustc
-            pkg-config
-            openssl
-            zlib
-            rust-analyzer
-            rustfmt
-            clippy
-          ];
-
-          shellHook = ''
-            echo "Naersk Rust development environment for shadow-harvester active."
-          '';
-        };
-      };
+      imports = [
+        nix/packages.nix
+        nix/devShells.nix
+        nix/nixosModules.nix
+        nix/overlays.nix
+      ];
     };
 }
