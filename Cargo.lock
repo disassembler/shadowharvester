@@ -2035,6 +2035,7 @@ dependencies = [
 name = "shadow-harvester"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
  "clap",
  "criterion",
  "cryptoxide 0.5.1",

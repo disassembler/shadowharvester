@@ -1,13 +1,6 @@
 #[cfg(test)]
 mod cip8_tests {
     use shadow_harvester_lib::cardano::*;
-    use pallas::{
-        crypto::key::ed25519::{SecretKey,PublicKey},
-        ledger::{
-            addresses::{Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart},
-            traverse::ComputeHash,
-        },
-    };
 
     // --- TEST VECTORS EXTRACTED FROM UPLOADED FILES ---
 
@@ -22,20 +15,9 @@ mod cip8_tests {
     // Expected outputs from signedTsCsMGS.json:
     const EXPECTED_PUBKEY_HEX: &str = "4497c0ef04fd9dd9b9d9abc2d8f19d8d09e69ae335c4355b7764c67e167d7f8e";
     const EXPECTED_ADDRESS_BECH32: &str = "addr1vxwce7p2uh9g0tjmxuyx3s7d96m7cq068pd863m8p3e0p9qjxpkqz";
-    const EXPECTED_SIGNATURE_HEX: &str = "50832da3a87ff019c799a74c910e451271195b9d6a1273cf1d8a83caf4228228fe554a6aa8b89aa8f8ccf3e7bfc02c976c0514f28c5e5d97512af08186148c0e";
+    const EXPECTED_SIGNATURE_HEX: &str = "84582aa201276761646472657373581d619d8cf82ae5ca87ae5b370868c3cd2eb7ec01fa385a7d47670c72f094a166686173686564f458b34920616772656520746f20616269646520627920746865207465726d7320616e6420636f6e646974696f6e732061732064657363726962656420696e2076657273696f6e20312d30206f6620746865204d69646e696768742073636176656e676572206d696e696e672070726f636573733a2032383162613566363966346239343365336662386132303339303837386132333237383761303465346265323231373766323437326236336466303163323030584050832da3a87ff019c799a74c910e451271195b9d6a1273cf1d8a83caf4228228fe554a6aa8b89aa8f8ccf3e7bfc02c976c0514f28c5e5d97512af08186148c0e";
 
 
-    // A helper function to derive the address from the secret key (matching the server's expected derivation)
-    fn derive_address_from_skey(sk: &SecretKey) -> (pallas_crypto::key::ed25519::PublicKey, String) {
-        let vk = sk.public_key();
-        let addr = ShelleyAddress::new(
-            Network::Mainnet,
-            ShelleyPaymentPart::key_hash(vk.compute_hash()),
-            ShelleyDelegationPart::Null
-        );
-
-        (vk, addr.to_bech32().unwrap())
-    }
 
     #[test]
     /// Tests that the correct public key and base address (with null staking part) are derived from the secret key.
@@ -72,21 +54,21 @@ mod cip8_tests {
     fn test_cip8_core_signature_match() {
         let keypair = generate_cardano_key_pair_from_skey(&SKEY_HEX.to_string());
 
-        let vk_hex = hex::encode(keypair.1.as_ref());
 
         // Sign the message hash using the SecretKey
         let signature = cip8_sign(&keypair, TC_MESSAGE);
-        let signature_hex = hex::encode(signature.0);
+        println!("pubkey: {:?}", signature.1);
+        println!("cose: {:?}", signature.0);
 
 
         // We check if the unique signature component matches the value seen in the JS output.
         // The CIP-8 wrapper/CBOR is ignored here, focusing only on the raw signature bytes.
-        //assert_eq!(
-        //    signature_hex,
-        //    EXPECTED_SIGNATURE_HEX,
-        //    "Core Ed25519 Signature mismatch. Expected: {}, Derived: {}",
-        //    EXPECTED_SIGNATURE_HEX,
-        //    signature_hex
-        //);
+        assert_eq!(
+            signature.0,
+            EXPECTED_SIGNATURE_HEX,
+            "Core Ed25519 Signature mismatch. Expected: {}, Derived: {}",
+            EXPECTED_SIGNATURE_HEX,
+            signature.0
+        );
     }
 }
