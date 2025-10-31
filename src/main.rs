@@ -27,6 +27,14 @@ enum MiningResult {
     MiningFailed,  // General mining or submission error (e.g., hash not found, transient API error)
 }
 
+fn format_duration(seconds: f64) -> String {
+    let s = seconds.floor() as u64;
+    let h = s / 3600;
+    let m = (s % 3600) / 60;
+    let s = s % 60;
+    format!("{}:{}:{}", h, m, s)
+}
+
 fn create_api_client() -> Result<Client, reqwest::Error> {
     Client::builder()
         .user_agent(USER_AGENT) // Set the custom User-Agent
@@ -82,26 +90,42 @@ fn poll_for_active_challenge(
     }
 }
 
-fn print_statistics(stats: Statistics) {
+fn print_statistics(stats_result: Result<Statistics, String>, total_hashes: u64, elapsed_secs: f64) {
     println!("\n==============================================");
     println!("📈 Mining Statistics Summary");
     println!("==============================================");
 
-    // --- LOCAL STATISTICS ---
-    println!("** YOUR LOCAL STATISTICS (Address: {}) **", stats.local_address);
-    println!("  Crypto Receipts (Solutions): {}", stats.crypto_receipts);
-    println!("  Night Allocation: {}", stats.night_allocation);
+    let hash_rate = if elapsed_secs > 0.0 { total_hashes as f64 / elapsed_secs } else { 0.0 };
+
+    println!("** LAST MINING CYCLE PERFORMANCE **");
+    println!("  Time Elapsed: {}", format_duration(elapsed_secs));
+    println!("  Total Hashes: {}", total_hashes);
+    println!("  Hash Rate: {:.2} H/s", hash_rate);
     println!("----------------------------------------------");
 
-    // --- GLOBAL STATISTICS ---
-    println!("** GLOBAL STATISTICS (All Miners) **");
-    println!("  NOTE: These statistics are aggregated across all wallets globally.");
-    println!("  Total Wallets: {}", stats.wallets);
-    println!("  Current Challenges: {}", stats.challenges);
-    println!("  Total Challenges Ever: {}", stats.total_challenges);
-    println!("  Total Crypto Receipts: {}", stats.total_crypto_receipts);
-    println!("  Recent Crypto Receipts: {}", stats.recent_crypto_receipts);
-    println!("==============================================");
+    match stats_result {
+        Ok(stats) => {
+            println!("** YOUR ACCOUNT STATISTICS (Address: {}) **", stats.local_address);
+            println!("  Crypto Receipts (Solutions): {}", stats.crypto_receipts);
+            println!("  Night Allocation: {}", stats.night_allocation);
+            println!("----------------------------------------------");
+
+            println!("** GLOBAL STATISTICS (All Miners) **");
+            println!("  NOTE: These statistics are aggregated across all wallets globally.");
+            println!("  Total Wallets: {}", stats.wallets);
+            println!("  Current Challenges: {}", stats.challenges);
+            println!("  Total Challenges Ever: {}", stats.total_challenges);
+            println!("  Total Crypto Receipts: {}", stats.total_crypto_receipts);
+            println!("  Recent Crypto Receipts: {}", stats.recent_crypto_receipts);
+            println!("==============================================");
+        }
+        Err(e) => {
+            println!("** FAILED TO FETCH API STATISTICS **");
+            eprintln!("  Error: {}", e);
+            println!("==============================================");
+        }
+
+    }
 }
 
 
@@ -115,8 +139,8 @@ fn run_single_mining_cycle(
     donate_to_option: Option<&String>,
     challenge_params: &api::ChallengeData,
     keypair: &cardano::KeyPairAndAddress,
-) -> MiningResult { // MODIFIED return type
-    let found_nonce = scavenge(
+) -> (MiningResult, u64, f64) {
+    let (found_nonce, total_hashes, elapsed_secs) = scavenge(
         mining_address.clone(),
         challenge_params.challenge_id.clone(),
         challenge_params.difficulty.clone(),
@@ -125,6 +149,8 @@ fn run_single_mining_cycle(
         challenge_params.no_pre_mine_hour_str.clone(),
         threads,
     );
+
+    let mut mining_result = MiningResult::MiningFailed;
 
     if let Some(nonce) = found_nonce {
         println!("\n✅ Solution found: {}. Submitting...", nonce);
@@ -141,11 +167,11 @@ fn run_single_mining_cycle(
 
             // Check for the specific "already solved" error
             if e.contains("Solution already exists") {
-                return MiningResult::AlreadySolved;
+                mining_result = MiningResult::AlreadySolved;
             }
 
             // Treat other submission errors as general failure
-            return MiningResult::MiningFailed;
+            mining_result = MiningResult::MiningFailed;
         }
         println!("🚀 Submission successful!");
 
@@ -166,11 +192,12 @@ fn run_single_mining_cycle(
                 eprintln!("⚠️ Donation failed. Details: {}", e);
             }
         }
-        return MiningResult::FoundAndSubmitted; // Single run successful
+        mining_result = MiningResult::FoundAndSubmitted; // Single run successful
     } else {
         println!("\n⚠️ Scavenging finished, but no solution was found.");
-        return MiningResult::MiningFailed; // Nonce not found is a general failure
+        mining_result = MiningResult::MiningFailed; // Nonce not found is a general failure
     }
+    (mining_result, total_hashes, elapsed_secs)
 }
 
 /// Prints a detailed summary of the current challenge and mining setup.
@@ -263,6 +290,8 @@ fn run_app(cli: Cli) -> Result<(), String> {
         // Key Generation/Loading (Fatal if key is invalid)
         let key_pair = cardano::generate_cardano_key_pair_from_skey(skey_hex);
         let mining_address = key_pair.2.to_bech32().unwrap();
+        let mut final_hashes: u64 = 0;
+        let mut final_elapsed: f64 = 0.0;
         let reg_message = tc_response.message.clone();
 
         println!("\n[REGISTRATION] Attempting initial registration for address: {}", mining_address);
@@ -314,7 +343,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
 
             // Inner mining/submission loop for robustness
             loop {
-                let result = run_single_mining_cycle(
+                let (result, total_hashes, elapsed_secs) = run_single_mining_cycle(
                     &client,
                     &api_url,
                     mining_address.clone(),
@@ -323,6 +352,9 @@ fn run_app(cli: Cli) -> Result<(), String> {
                     &challenge_params,
                     &key_pair,
                 );
+
+                final_hashes = total_hashes;
+                final_elapsed = elapsed_secs;
 
                 match result {
                     MiningResult::FoundAndSubmitted | MiningResult::AlreadySolved => {
@@ -350,10 +382,8 @@ fn run_app(cli: Cli) -> Result<(), String> {
                     }
                 }
             } // END of Inner Loop
-            match api::fetch_statistics(&client, &api_url, &mining_address) {
-                Ok(stats) => print_statistics(stats),
-                Err(e) => eprintln!("⚠️ Failed to fetch final statistics: {}", e),
-            }
+            let stats_result = api::fetch_statistics(&client, &api_url, &mining_address);
+            print_statistics(stats_result, final_hashes, final_elapsed);
         }
     }
 
@@ -364,6 +394,9 @@ fn run_app(cli: Cli) -> Result<(), String> {
         println!("⛏️  Shadow Harvester: CONTINUOUS MINING (New Key Per Cycle) Mode");
         println!("==============================================");
         println!("Donation Target: {}", cli.donate_to.as_ref().unwrap());
+
+        let mut final_hashes: u64 = 0;
+        let mut final_elapsed: f64 = 0.0;
 
         // Continuous loop for generating a new key, registering, and mining
         loop {
@@ -409,15 +442,19 @@ fn run_app(cli: Cli) -> Result<(), String> {
             );
 
             // Use the new MiningResult for robustness in this mode too
-            match run_single_mining_cycle(
-                &client,
-                &api_url,
-                generated_mining_address.to_string(),
-                threads,
-                donate_to_option_ref,
-                &challenge_params,
-                &key_pair,
-            ) {
+            let (result, total_hashes, elapsed_secs) = run_single_mining_cycle(
+                    &client,
+                    &api_url,
+                    generated_mining_address.to_string(),
+                    threads,
+                    donate_to_option_ref,
+                    &challenge_params,
+                    &key_pair,
+                );
+            final_hashes = total_hashes;
+            final_elapsed = elapsed_secs;
+
+            match result {
                 MiningResult::FoundAndSubmitted => {
                     // Success, continue immediately with the next key generation cycle
                 }

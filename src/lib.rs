@@ -544,7 +544,7 @@ pub fn scavenge(
     latest_submission: String,
     no_pre_mine_hour: String,
     nb_threads: u32,
-) -> Option<String> { // <-- FIX: Explicitly define the return type
+) -> (Option<String>, u64, f64) { // <-- FIX: Explicitly define the return type
     const MB: usize = 1024 * 1024;
     const GB: usize = 1024 * MB;
 
@@ -555,7 +555,7 @@ pub fn scavenge(
     let nb_threads_u64 = nb_threads as u64;
     let step_size = nb_threads_u64;
 
-    let found_nonce: Option<String> = thread::scope(|s| {
+    let (found_nonce, final_hashes_checked, elapsed_time) = thread::scope(|s| {
         println!("Generating ROM with key: {}", no_pre_mine_key);
 
         let rom = Rom::new(
@@ -649,6 +649,8 @@ pub fn scavenge(
 
         // Final message after the mining stops (channel disconnects)
         let final_nonce_hex = found.pop().map(|nonce| format!("{:016x}", nonce));
+        let final_elapsed = start_loop.elapsed().unwrap().as_secs_f64();
+        let final_hashes = pos;
 
         if final_nonce_hex.is_some() {
             let msg = format!("Scavenging complete. Found 1 solution. Total hashes checked: {}", pos);
@@ -658,8 +660,8 @@ pub fn scavenge(
         }
 
         // Return the found nonce (if any) from the thread scope
-        final_nonce_hex
+        (final_nonce_hex, final_hashes, final_elapsed)
     });
 
-    found_nonce
+    (found_nonce, final_hashes_checked, elapsed_time)
 }
