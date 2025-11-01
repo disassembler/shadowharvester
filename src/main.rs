@@ -483,7 +483,6 @@ fn run_app(cli: Cli) -> Result<(), String> {
 
         let reg_message = tc_response.message.clone();
         let mut wallet_deriv_index: u32 = 0; // Start at derivation index 0
-        let mut current_challenge_id = String::new(); // Used to reset index on challenge change
         let mut max_registered_index = None;
         let mut backoff_challenge = Backoff::new(5, 300, 2.0);
         let mut backoff_reg = Backoff::new(5, 300, 2.0);
@@ -499,6 +498,12 @@ fn run_app(cli: Cli) -> Result<(), String> {
         loop {
             backoff_challenge.reset();
 
+            let old_challenge_id = current_challenge_id.clone();
+
+            // In this mode, we never want to wait for a new challenge,
+            // which is exactly the point of increasing the wallet derivation path index.
+            current_challenge_id.clear();
+
             // Get challenge parameters (fixed or dynamic)
             let challenge_params = match get_challenge_params(&client, &api_url, cli_challenge_ref, &mut current_challenge_id) {
                 Ok(Some(params)) => params,
@@ -511,8 +516,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
             };
 
             // Reset index only if a *new* challenge ID is detected from the API poll (not in fixed mode)
-            if cli_challenge_ref.is_none() && challenge_params.challenge_id != current_challenge_id {
-                current_challenge_id = challenge_params.challenge_id.clone();
+            if cli_challenge_ref.is_none() && challenge_params.challenge_id != old_challenge_id {
                 wallet_deriv_index = 0;
             }
 
@@ -584,8 +588,6 @@ fn run_app(cli: Cli) -> Result<(), String> {
                 }
                 MiningResult::MiningFailed => {
                     eprintln!("\n⚠️ Mining cycle failed. Retrying in 1 minute with the SAME index {}.", wallet_deriv_index);
-                    // Reset current challenge so that `get_active_challenge_data()` does not wait for a new one.
-                    current_challenge_id.clear();
                     thread::sleep(Duration::from_secs(60));
                 }
             }
