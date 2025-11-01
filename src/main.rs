@@ -124,12 +124,12 @@ fn get_challenge_params(
         fixed_challenge_params.latest_submission = cli_challenge_data.latest_submission.clone();
         let current_time: DateTime<Utc> = Utc::now();
         let latest_submission_time = match DateTime::parse_from_rfc3339(&fixed_challenge_params.latest_submission) {
-        Ok(dt) => dt.with_timezone(&Utc), // Convert to Utc if it wasn't already
-        Err(e) => {
-            eprintln!("Error parsing target time: {}", e);
-            process::exit(1);
-        }
-    };
+            Ok(dt) => dt.with_timezone(&Utc), // Convert to Utc if it wasn't already
+            Err(e) => {
+                eprintln!("Error parsing target time: {}", e);
+                process::exit(1);
+            }
+        };
 
         // 4. Update current_id and return the fixed challenge
         // This prevents the polling logic from waiting 5 mins if it sees the same ID.
