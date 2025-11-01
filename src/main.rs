@@ -301,8 +301,12 @@ fn run_app(cli: Cli) -> Result<(), String> {
         }
     };
 
-    if cli.payment_key.is_some() && cli.mnemonic.is_some() {
-        return Err("Cannot use both '--payment-key' and '--mnemonic' flags simultaneously.".to_string());
+    if cli.mnemonic.is_some() && cli.mnemonic_file.is_some() {
+        return Err("Cannot use both '--mnemonic' and '--mnemonic-file' flags simultaneously.".to_string());
+    }
+
+    if cli.payment_key.is_some() && (cli.mnemonic.is_some() || cli.mnemonic_file.is_some()) {
+        return Err("Cannot use both '--payment-key' and '--mnemonic' or '--mnemonic-file' flags simultaneously.".to_string());
     }
 
     let client = create_api_client()
@@ -335,7 +339,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
     let cli_challenge_ref = cli.challenge.as_ref();
 
     // 4. Default mode: display info and exit
-    if cli.payment_key.is_none() && cli.donate_to.is_none() && cli.mnemonic.is_none() && cli.challenge.is_none() {
+    if cli.payment_key.is_none() && cli.donate_to.is_none() && cli.mnemonic.is_none() && cli.mnemonic_file.is_none() && cli.challenge.is_none() {
         // Fetch challenge for info display
         match api::get_active_challenge_data(&client, &api_url) {
             Ok(challenge_params) => {
@@ -348,11 +352,20 @@ fn run_app(cli: Cli) -> Result<(), String> {
             },
             Err(e) => eprintln!("Could not fetch active challenge for info display: {}", e),
         };
-        println!("MODE: INFO ONLY. Provide '--payment-key', '--mnemonic', '--donate-to', or '--challenge' to begin mining.");
+        println!("MODE: INFO ONLY. Provide '--payment-key', '--mnemonic', '--mnemonic-file', '--donate-to', or '--challenge' to begin mining.");
         return Ok(())
     }
 
     // 5. Determine Operation Mode and Start Mining
+    let mnemonic: Option<String> = if let Some(mnemonic) = cli.mnemonic {
+        Some(mnemonic.clone())
+    } else if let Some(mnemonic_file) = cli.mnemonic_file {
+        Some(std::fs::read_to_string(mnemonic_file)
+            .map_err(|e| format!("Could not read mnemonic from file: {}", e))?)
+    } else {
+        None
+    };
+
     let mut current_challenge_id = String::new(); // Used to track challenge changes in dynamic mode
 
     // --- MODE A: Persistent Key Continuous Mining ---
@@ -464,7 +477,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
     }
 
     // --- MODE B: Mnemonic Sequential Mining ---
-    if let Some(mnemonic_phrase) = cli.mnemonic.as_ref() {
+    if let Some(mnemonic_phrase) = mnemonic {
 
         let reg_message = tc_response.message.clone();
         let mut wallet_deriv_index: u32 = 0; // Start at derivation index 0
@@ -498,7 +511,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
             }
 
             // 1. Generate New Key Pair using Mnemonic and Index
-            let key_pair = cardano::derive_key_pair_from_mnemonic(mnemonic_phrase, wallet_deriv_index);
+            let key_pair = cardano::derive_key_pair_from_mnemonic(&mnemonic_phrase, wallet_deriv_index);
             let mining_address = key_pair.2.to_bech32().unwrap();
 
             // 2. Initial Registration (New address must be registered every cycle)

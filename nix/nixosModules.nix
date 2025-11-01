@@ -27,9 +27,16 @@
                 str bool ints.u32
               ]);
 
-              options.api-url = lib.mkOption {
-                type = lib.types.str;
-                default = "https://sm.midnight.gd/api";
+              options = {
+                api-url = lib.mkOption {
+                  type = lib.types.str;
+                  default = "https://sm.midnight.gd/api";
+                };
+
+                mnemonic-file = lib.mkOption {
+                  type = with lib.types; nullOr path;
+                  default = null;
+                };
               };
             };
             default = {};
@@ -46,7 +53,10 @@
             script = toString [
               "exec"
               (with lib; pipe cfg.package [getExe builtins.baseNameOf escapeShellArg])
-              (lib.cli.toGNUCommandLineShell {} cfg.settings)
+              (lib.cli.toGNUCommandLineShell {} (removeAttrs cfg.settings ["mnemonic-file"]))
+              (lib.cli.toGNUCommandLine {} (
+                lib.optionalAttrs (cfg.settings.mnemonic-file != null) { mnemonic-file = ''"$CREDENTIALS_DIRECTORY"/mnemonic''; }
+              ))
             ];
 
             enableStrictShellChecks = true;
@@ -54,6 +64,7 @@
             serviceConfig = {
               Type = "exec";
               DynamicUser = true;
+              LoadCredential = lib.optional (cfg.settings.mnemonic-file != null) "mnemonic:${cfg.settings.mnemonic-file}";
             };
           };
         };
