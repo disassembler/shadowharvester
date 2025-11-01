@@ -236,6 +236,10 @@ fn run_app(cli: Cli) -> Result<(), String> {
         }
     };
 
+    if cli.payment_key.is_some() && cli.mnemonic.is_some() {
+        return Err("Cannot use both '--payment-key' and '--mnemonic' flags simultaneously.".to_string());
+    }
+
     let client = create_api_client()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -265,7 +269,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
     let threads = cli.threads;
 
     // 4. Default mode: display info and exit
-    if cli.payment_key.is_none() && cli.donate_to.is_none() {
+    if cli.payment_key.is_none() && cli.donate_to.is_none() && cli.mnemonic.is_none() { // MODIFIED: Check for mnemonic too
         // Fetch challenge for info display
         match api::get_active_challenge_data(&client, &api_url) {
             Ok(challenge_params) => {
@@ -278,7 +282,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
             },
             Err(e) => eprintln!("Could not fetch active challenge for info display: {}", e),
         };
-        println!("MODE: INFO ONLY. Provide '--payment-key' or '--donate-to' to begin mining.");
+        println!("MODE: INFO ONLY. Provide '--payment-key', '--mnemonic', or '--donate-to' to begin mining.");
         return Ok(())
     }
 
@@ -313,6 +317,9 @@ fn run_app(cli: Cli) -> Result<(), String> {
         println!("\n==============================================");
         println!("⛏️  Shadow Harvester: PERSISTENT KEY CONTINUOUS MINING Mode");
         println!("==============================================");
+        if cli.donate_to.is_some() {
+            println!("Donation Target: {}", cli.donate_to.as_ref().unwrap());
+        }
 
         let mut current_challenge_id = String::new();
 
@@ -387,7 +394,101 @@ fn run_app(cli: Cli) -> Result<(), String> {
         }
     }
 
-    // --- MODE B: Continuous Mining & Donation (New Key Gen, Old Mode B) ---
+    if let Some(mnemonic_phrase) = cli.mnemonic.as_ref() {
+
+        let reg_message = tc_response.message.clone();
+        let mut wallet_deriv_index: u32 = 0; // Start at derivation index 0
+        let mut current_challenge_id = String::new();
+        let mut next_challenge_id = String::new();
+        let mut max_registered_index = 0;
+
+        println!("\n==============================================");
+        println!("⛏️  Shadow Harvester: MNEMONIC SEQUENTIAL MINING Mode");
+        println!("==============================================");
+        if cli.donate_to.is_some() {
+            println!("Donation Target: {}", cli.donate_to.as_ref().unwrap());
+        }
+
+        // Outer Polling loop (robustly checks for challenge changes)
+        loop {
+            next_challenge_id = String::new();
+            // Poll for a new/active challenge. This function handles the 5-minute wait
+            let challenge_params = match poll_for_active_challenge(&client, &api_url, &mut next_challenge_id) {
+                Ok(Some(params)) => params,
+                Ok(None) => continue, // Continue polling
+                Err(e) => {
+                    eprintln!("⚠️ Critical API Error during challenge polling: {}. Retrying in 5 minutes...", e);
+                    thread::sleep(Duration::from_secs(5 * 60));
+                    continue;
+                }
+            };
+            if next_challenge_id != current_challenge_id {
+                current_challenge_id = next_challenge_id;
+                wallet_deriv_index = 0;
+            }
+
+            // 1. Generate New Key Pair using Mnemonic and Index
+            let key_pair = cardano::derive_key_pair_from_mnemonic(mnemonic_phrase, wallet_deriv_index);
+            let mining_address = key_pair.2.to_bech32().unwrap();
+
+            // 2. Initial Registration (New address must be registered every cycle)
+            println!("\n[CYCLE START] Deriving Address Index {}: {}", wallet_deriv_index, mining_address);
+
+            // Only register if we haven't already in this session for this address
+            if wallet_deriv_index > max_registered_index {
+                let reg_signature = cardano::cip8_sign(&key_pair, &reg_message);
+                if let Err(e) = api::register_address(
+                    &client,
+                    &api_url,
+                    &mining_address,
+                    &reg_message,
+                    &reg_signature.0,
+                    &hex::encode(&key_pair.1.as_ref()),
+                ) {
+                    eprintln!("Registration failed: {}. Retrying in 5 minutes...", e);
+                    thread::sleep(Duration::from_secs(5 * 60));
+                    continue; // Skip this cycle and try polling again
+                }
+                max_registered_index = wallet_deriv_index;
+            }
+
+
+            // 3. Mining and Submission
+            print_mining_setup(
+                &api_url,
+                Some(mining_address.as_str()),
+                threads,
+                &challenge_params
+            );
+
+            // Capture metrics for this specific cycle
+            let (result, total_hashes, elapsed_secs) = run_single_mining_cycle(
+                &client,
+                &api_url,
+                mining_address.clone(),
+                threads,
+                donate_to_option_ref,
+                &challenge_params,
+                &key_pair,
+            );
+
+            // ⭐ CRITICAL: Increment the index only if mining was successful or already solved.
+            match result {
+                MiningResult::FoundAndSubmitted | MiningResult::AlreadySolved => {
+                    wallet_deriv_index = wallet_deriv_index.wrapping_add(1);
+                    println!("\n✅ Cycle complete. Incrementing index to {}.", wallet_deriv_index);
+                    // No need for a 5-minute wait here, as poll_for_active_challenge handles it.
+                }
+                MiningResult::MiningFailed => {
+                    eprintln!("\n⚠️ Mining cycle failed. Retrying in 1 minute with the SAME index {}.", wallet_deriv_index);
+                    thread::sleep(Duration::from_secs(60));
+                }
+            }
+
+            // The outer loop restarts, polling for the next challenge (or waiting if current is still active)
+        }
+    }
+
     else if cli.donate_to.is_some() {
 
         println!("\n==============================================");

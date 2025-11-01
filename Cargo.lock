@@ -2035,10 +2035,11 @@ dependencies = [
 name = "shadow-harvester"
 version = "0.1.0"
 dependencies = [
- "ciborium",
+ "bip39",
  "clap",
  "criterion",
  "cryptoxide 0.5.1",
+ "ed25519-bip32",
  "fmt",
  "getrandom 0.3.4",
  "hex",

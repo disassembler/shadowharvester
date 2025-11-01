@@ -31,7 +31,12 @@ pub struct Cli {
     /// NEW: Cardano address (bech32) to donate all accumulated rewards to.
     #[arg(long)]
     pub donate_to: Option<String>,
+
+    /// NEW: 24-word BIP39 mnemonic phrase for sequential address generation.
+    #[arg(long)]
+    pub mnemonic: Option<String>,
 }
+
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
