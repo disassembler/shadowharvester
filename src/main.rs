@@ -12,6 +12,8 @@ use std::process;
 
 // Declare the new API module
 mod api;
+mod backoff;
+use backoff::Backoff;
 // Declare the CLI module
 mod cli;
 use cli::{Cli, Commands};
@@ -483,6 +485,8 @@ fn run_app(cli: Cli) -> Result<(), String> {
         let mut wallet_deriv_index: u32 = 0; // Start at derivation index 0
         let mut current_challenge_id = String::new(); // Used to reset index on challenge change
         let mut max_registered_index = None;
+        let mut backoff_challenge = Backoff::new(5, 300, 2.0);
+        let mut backoff_reg = Backoff::new(5, 300, 2.0);
 
         println!("\n==============================================");
         println!("⛏️  Shadow Harvester: MNEMONIC SEQUENTIAL MINING Mode ({})", if cli_challenge_ref.is_some() { "FIXED CHALLENGE" } else { "DYNAMIC POLLING" });
@@ -493,13 +497,15 @@ fn run_app(cli: Cli) -> Result<(), String> {
 
         // Outer Polling loop (robustly checks for challenge changes)
         loop {
+            backoff_challenge.reset();
+
             // Get challenge parameters (fixed or dynamic)
             let challenge_params = match get_challenge_params(&client, &api_url, cli_challenge_ref, &mut current_challenge_id) {
                 Ok(Some(params)) => params,
                 Ok(None) => continue, // Continue polling after sleep/wait
                 Err(e) => {
-                    eprintln!("⚠️ Critical API Error during challenge check: {}. Retrying in 5 minutes...", e);
-                    thread::sleep(Duration::from_secs(5 * 60));
+                    eprintln!("⚠️ Critical API Error during challenge polling: {}. Retrying with exponential backoff...", e);
+                    backoff_challenge.sleep();
                     continue;
                 }
             };
@@ -531,11 +537,12 @@ fn run_app(cli: Cli) -> Result<(), String> {
                     &reg_signature.0,
                     &hex::encode(&key_pair.1.as_ref()),
                 ) {
-                    eprintln!("Registration failed: {}. Retrying in 5 minutes...", e);
-                    thread::sleep(Duration::from_secs(5 * 60));
+                    eprintln!("Registration failed: {}. Retrying with exponential backoff...", e);
+                    backoff_reg.sleep();
                     continue; // Skip this cycle and try polling again
                 }
                 max_registered_index = Some(wallet_deriv_index);
+                backoff_reg.reset();
             }
 
 
