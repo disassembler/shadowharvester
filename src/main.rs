@@ -469,7 +469,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
         let reg_message = tc_response.message.clone();
         let mut wallet_deriv_index: u32 = 0; // Start at derivation index 0
         let mut current_challenge_id = String::new(); // Used to reset index on challenge change
-        let mut max_registered_index = 0;
+        let mut max_registered_index = None;
 
         println!("\n==============================================");
         println!("⛏️  Shadow Harvester: MNEMONIC SEQUENTIAL MINING Mode ({})", if cli_challenge_ref.is_some() { "FIXED CHALLENGE" } else { "DYNAMIC POLLING" });
@@ -505,7 +505,10 @@ fn run_app(cli: Cli) -> Result<(), String> {
             println!("\n[CYCLE START] Deriving Address Index {}: {}", wallet_deriv_index, mining_address);
 
             // Only register if we haven't already in this session for this address
-            if wallet_deriv_index > max_registered_index {
+            if match max_registered_index {
+                Some(idx) => wallet_deriv_index > idx,
+                None => true
+            } {
                 let reg_signature = cardano::cip8_sign(&key_pair, &reg_message);
                 if let Err(e) = api::register_address(
                     &client,
@@ -519,7 +522,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
                     thread::sleep(Duration::from_secs(5 * 60));
                     continue; // Skip this cycle and try polling again
                 }
-                max_registered_index = wallet_deriv_index;
+                max_registered_index = Some(wallet_deriv_index);
             }
 
 
@@ -551,6 +554,8 @@ fn run_app(cli: Cli) -> Result<(), String> {
                 }
                 MiningResult::MiningFailed => {
                     eprintln!("\n⚠️ Mining cycle failed. Retrying in 1 minute with the SAME index {}.", wallet_deriv_index);
+                    // Reset current challenge so that `get_active_challenge_data()` does not wait for a new one.
+                    current_challenge_id.clear();
                     thread::sleep(Duration::from_secs(60));
                 }
             }
