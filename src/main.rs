@@ -554,6 +554,9 @@ fn run_app(cli: Cli) -> Result<(), String> {
                     thread::sleep(Duration::from_secs(60));
                 }
             }
+
+            let stats_result = api::fetch_statistics(&client, &api_url, &mining_address);
+            print_statistics(stats_result, total_hashes, elapsed_secs);
         }
     }
 
