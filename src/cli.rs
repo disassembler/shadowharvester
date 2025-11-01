@@ -35,6 +35,9 @@ pub struct Cli {
     /// NEW: 24-word BIP39 mnemonic phrase for sequential address generation.
     #[arg(long)]
     pub mnemonic: Option<String>,
+
+    #[arg(long)]
+    pub challenge: Option<String>,
 }
 
 

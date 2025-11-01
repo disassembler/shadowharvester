@@ -23,7 +23,7 @@ pub struct RegistrationReceipt {
     pub registration_receipt: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ChallengeData {
     pub challenge_id: String,
     pub difficulty: String,
@@ -111,6 +111,35 @@ pub struct Statistics {
     // Local fields
     pub crypto_receipts: u32,
     pub night_allocation: u32,
+}
+// NEW: Struct for the challenge parameters provided via CLI
+#[derive(Debug, Clone)]
+pub struct CliChallengeData {
+    pub challenge_id: String,
+    pub no_pre_mine_key: String,
+    pub difficulty: String,
+    pub no_pre_mine_hour_str: String,
+    pub latest_submission: String,
+}
+
+// NEW FUNCTION: Parses the comma-separated CLI challenge string
+pub fn parse_cli_challenge_string(challenge_str: &str) -> Result<CliChallengeData, String> {
+    let parts: Vec<&str> = challenge_str.split(',').collect();
+
+    if parts.len() != 5 {
+        return Err(format!(
+            "Invalid --challenge format. Expected 5 comma-separated values, found {}. Format: challenge_id,no_pre_mine,difficulty,no_pre_mine_hour,latest_submission",
+            parts.len()
+        ));
+    }
+
+    Ok(CliChallengeData {
+        challenge_id: parts[0].trim().to_string(),
+        no_pre_mine_key: parts[1].trim().to_string(),
+        difficulty: parts[2].trim().to_string(),
+        no_pre_mine_hour_str: parts[3].trim().to_string(),
+        latest_submission: parts[4].trim().to_string(),
+    })
 }
 
 
