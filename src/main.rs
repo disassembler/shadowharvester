@@ -12,6 +12,8 @@ use std::process;
 
 // Declare the new API module
 mod api;
+mod backoff;
+use backoff::Backoff;
 // Declare the CLI module
 mod cli;
 use cli::{Cli, Commands};
@@ -122,12 +124,12 @@ fn get_challenge_params(
         fixed_challenge_params.latest_submission = cli_challenge_data.latest_submission.clone();
         let current_time: DateTime<Utc> = Utc::now();
         let latest_submission_time = match DateTime::parse_from_rfc3339(&fixed_challenge_params.latest_submission) {
-        Ok(dt) => dt.with_timezone(&Utc), // Convert to Utc if it wasn't already
-        Err(e) => {
-            eprintln!("Error parsing target time: {}", e);
-            process::exit(1);
-        }
-    };
+            Ok(dt) => dt.with_timezone(&Utc), // Convert to Utc if it wasn't already
+            Err(e) => {
+                eprintln!("Error parsing target time: {}", e);
+                process::exit(1);
+            }
+        };
 
         // 4. Update current_id and return the fixed challenge
         // This prevents the polling logic from waiting 5 mins if it sees the same ID.
@@ -301,8 +303,12 @@ fn run_app(cli: Cli) -> Result<(), String> {
         }
     };
 
-    if cli.payment_key.is_some() && cli.mnemonic.is_some() {
-        return Err("Cannot use both '--payment-key' and '--mnemonic' flags simultaneously.".to_string());
+    if cli.mnemonic.is_some() && cli.mnemonic_file.is_some() {
+        return Err("Cannot use both '--mnemonic' and '--mnemonic-file' flags simultaneously.".to_string());
+    }
+
+    if cli.payment_key.is_some() && (cli.mnemonic.is_some() || cli.mnemonic_file.is_some()) {
+        return Err("Cannot use both '--payment-key' and '--mnemonic' or '--mnemonic-file' flags simultaneously.".to_string());
     }
 
     let client = create_api_client()
@@ -335,7 +341,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
     let cli_challenge_ref = cli.challenge.as_ref();
 
     // 4. Default mode: display info and exit
-    if cli.payment_key.is_none() && cli.donate_to.is_none() && cli.mnemonic.is_none() && cli.challenge.is_none() {
+    if cli.payment_key.is_none() && cli.donate_to.is_none() && cli.mnemonic.is_none() && cli.mnemonic_file.is_none() && cli.challenge.is_none() {
         // Fetch challenge for info display
         match api::get_active_challenge_data(&client, &api_url) {
             Ok(challenge_params) => {
@@ -348,11 +354,20 @@ fn run_app(cli: Cli) -> Result<(), String> {
             },
             Err(e) => eprintln!("Could not fetch active challenge for info display: {}", e),
         };
-        println!("MODE: INFO ONLY. Provide '--payment-key', '--mnemonic', '--donate-to', or '--challenge' to begin mining.");
+        println!("MODE: INFO ONLY. Provide '--payment-key', '--mnemonic', '--mnemonic-file', '--donate-to', or '--challenge' to begin mining.");
         return Ok(())
     }
 
     // 5. Determine Operation Mode and Start Mining
+    let mnemonic: Option<String> = if let Some(mnemonic) = cli.mnemonic {
+        Some(mnemonic.clone())
+    } else if let Some(mnemonic_file) = cli.mnemonic_file {
+        Some(std::fs::read_to_string(mnemonic_file)
+            .map_err(|e| format!("Could not read mnemonic from file: {}", e))?)
+    } else {
+        None
+    };
+
     let mut current_challenge_id = String::new(); // Used to track challenge changes in dynamic mode
 
     // --- MODE A: Persistent Key Continuous Mining ---
@@ -464,12 +479,13 @@ fn run_app(cli: Cli) -> Result<(), String> {
     }
 
     // --- MODE B: Mnemonic Sequential Mining ---
-    if let Some(mnemonic_phrase) = cli.mnemonic.as_ref() {
+    if let Some(mnemonic_phrase) = mnemonic {
 
         let reg_message = tc_response.message.clone();
         let mut wallet_deriv_index: u32 = 0; // Start at derivation index 0
-        let mut current_challenge_id = String::new(); // Used to reset index on challenge change
-        let mut max_registered_index = 0;
+        let mut max_registered_index = None;
+        let mut backoff_challenge = Backoff::new(5, 300, 2.0);
+        let mut backoff_reg = Backoff::new(5, 300, 2.0);
 
         println!("\n==============================================");
         println!("⛏️  Shadow Harvester: MNEMONIC SEQUENTIAL MINING Mode ({})", if cli_challenge_ref.is_some() { "FIXED CHALLENGE" } else { "DYNAMIC POLLING" });
@@ -480,46 +496,67 @@ fn run_app(cli: Cli) -> Result<(), String> {
 
         // Outer Polling loop (robustly checks for challenge changes)
         loop {
+            backoff_challenge.reset();
+
+            let old_challenge_id = current_challenge_id.clone();
+
+            // In this mode, we never want to wait for a new challenge,
+            // which is exactly the point of increasing the wallet derivation path index.
+            current_challenge_id.clear();
+
             // Get challenge parameters (fixed or dynamic)
             let challenge_params = match get_challenge_params(&client, &api_url, cli_challenge_ref, &mut current_challenge_id) {
                 Ok(Some(params)) => params,
                 Ok(None) => continue, // Continue polling after sleep/wait
                 Err(e) => {
-                    eprintln!("⚠️ Critical API Error during challenge check: {}. Retrying in 5 minutes...", e);
-                    thread::sleep(Duration::from_secs(5 * 60));
+                    eprintln!("⚠️ Critical API Error during challenge polling: {}. Retrying with exponential backoff...", e);
+                    backoff_challenge.sleep();
                     continue;
                 }
             };
 
             // Reset index only if a *new* challenge ID is detected from the API poll (not in fixed mode)
-            if cli_challenge_ref.is_none() && challenge_params.challenge_id != current_challenge_id {
-                current_challenge_id = challenge_params.challenge_id.clone();
+            if cli_challenge_ref.is_none() && challenge_params.challenge_id != old_challenge_id {
                 wallet_deriv_index = 0;
             }
 
             // 1. Generate New Key Pair using Mnemonic and Index
-            let key_pair = cardano::derive_key_pair_from_mnemonic(mnemonic_phrase, wallet_deriv_index);
+            let key_pair = cardano::derive_key_pair_from_mnemonic(&mnemonic_phrase, cli.mnemonic_account, wallet_deriv_index);
             let mining_address = key_pair.2.to_bech32().unwrap();
 
             // 2. Initial Registration (New address must be registered every cycle)
             println!("\n[CYCLE START] Deriving Address Index {}: {}", wallet_deriv_index, mining_address);
 
             // Only register if we haven't already in this session for this address
-            if wallet_deriv_index > max_registered_index {
-                let reg_signature = cardano::cip8_sign(&key_pair, &reg_message);
-                if let Err(e) = api::register_address(
-                    &client,
-                    &api_url,
-                    &mining_address,
-                    &reg_message,
-                    &reg_signature.0,
-                    &hex::encode(&key_pair.1.as_ref()),
-                ) {
-                    eprintln!("Registration failed: {}. Retrying in 5 minutes...", e);
-                    thread::sleep(Duration::from_secs(5 * 60));
-                    continue; // Skip this cycle and try polling again
+            if match max_registered_index {
+                Some(idx) => wallet_deriv_index > idx,
+                None => true
+            } {
+                // Check to see if the address is already registered
+                let stats_result = api::fetch_statistics(&client, &api_url, &mining_address);
+                match stats_result {
+                    Ok(stats) => {
+                        println!("  Crypto Receipts (Solutions): {}", stats.crypto_receipts);
+                        println!("  Night Allocation: {}", stats.night_allocation);
+                    }
+                    Err(_) => {
+                        let reg_signature = cardano::cip8_sign(&key_pair, &reg_message);
+                        if let Err(e) = api::register_address(
+                            &client,
+                            &api_url,
+                            &mining_address,
+                            &reg_message,
+                            &reg_signature.0,
+                            &hex::encode(&key_pair.1.as_ref()),
+                        ) {
+                            eprintln!("Registration failed: {}. Retrying with exponential backoff...", e);
+                            backoff_reg.sleep();
+                            continue; // Skip this cycle and try polling again
+                        }
+                    }
                 }
-                max_registered_index = wallet_deriv_index;
+                max_registered_index = Some(wallet_deriv_index);
+                backoff_reg.reset();
             }
 
 
@@ -554,6 +591,9 @@ fn run_app(cli: Cli) -> Result<(), String> {
                     thread::sleep(Duration::from_secs(60));
                 }
             }
+
+            let stats_result = api::fetch_statistics(&client, &api_url, &mining_address);
+            print_statistics(stats_result, total_hashes, elapsed_secs);
         }
     }
 

@@ -37,6 +37,12 @@ pub struct Cli {
     pub mnemonic: Option<String>,
 
     #[arg(long)]
+    pub mnemonic_file: Option<String>,
+
+    #[arg(long, default_value_t = 0)]
+    pub mnemonic_account: u32,
+
+    #[arg(long)]
     pub challenge: Option<String>,
 }
 
