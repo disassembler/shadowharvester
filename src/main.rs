@@ -494,11 +494,13 @@ fn run_app(cli: Cli) -> Result<(), String> {
             println!("Donation Target: {}", cli.donate_to.as_ref().unwrap());
         }
 
+        let mut last_seen_challenge_id = String::new();
+
         // Outer Polling loop (robustly checks for challenge changes)
         loop {
             backoff_challenge.reset();
 
-            let old_challenge_id = current_challenge_id.clone();
+            let old_challenge_id = last_seen_challenge_id.clone();
 
             // In this mode, we never want to wait for a new challenge,
             // which is exactly the point of increasing the wallet derivation path index.
@@ -506,19 +508,32 @@ fn run_app(cli: Cli) -> Result<(), String> {
 
             // Get challenge parameters (fixed or dynamic)
             let challenge_params = match get_challenge_params(&client, &api_url, cli_challenge_ref, &mut current_challenge_id) {
-                Ok(Some(params)) => params,
-                Ok(None) => continue, // Continue polling after sleep/wait
+                Ok(Some(params)) => {
+                    backoff_challenge.reset();
+
+                    // Reset index only if we saw a new challenge
+                    if cli_challenge_ref.is_none() && params.challenge_id != old_challenge_id {
+                        wallet_deriv_index = 0;
+                    }
+
+                    // Update last seen only on success
+                    last_seen_challenge_id = params.challenge_id.clone();
+
+                    params
+                },
+                Ok(None) => {
+                    // Nothing new; count as success for backoff purposes
+                    backoff_challenge.reset();
+
+                    // Continue polling after sleep/wait
+                    continue;
+                },
                 Err(e) => {
                     eprintln!("⚠️ Critical API Error during challenge polling: {}. Retrying with exponential backoff...", e);
                     backoff_challenge.sleep();
                     continue;
                 }
             };
-
-            // Reset index only if a *new* challenge ID is detected from the API poll (not in fixed mode)
-            if cli_challenge_ref.is_none() && challenge_params.challenge_id != old_challenge_id {
-                wallet_deriv_index = 0;
-            }
 
             // 1. Generate New Key Pair using Mnemonic and Index
             let key_pair = cardano::derive_key_pair_from_mnemonic(&mnemonic_phrase, cli.mnemonic_account, wallet_deriv_index);
