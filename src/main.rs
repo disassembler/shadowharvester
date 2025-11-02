@@ -482,7 +482,9 @@ fn run_app(cli: Cli) -> Result<(), String> {
     if let Some(mnemonic_phrase) = mnemonic {
 
         let reg_message = tc_response.message.clone();
-        let mut wallet_deriv_index: u32 = 0; // Start at derivation index 0
+        // Start at derivation index 0 or CLI flag passed in if resuming
+        let mut wallet_deriv_index: u32 = cli.mnemonic_starting_index;
+        let mut first_run = true;
         let mut max_registered_index = None;
         let mut backoff_challenge = Backoff::new(5, 300, 2.0);
         let mut backoff_reg = Backoff::new(5, 300, 2.0);
@@ -512,7 +514,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
                     backoff_challenge.reset();
 
                     // Reset index only if we saw a new challenge
-                    if cli_challenge_ref.is_none() && params.challenge_id != old_challenge_id {
+                    if cli_challenge_ref.is_none() && params.challenge_id != old_challenge_id && first_run == false {
                         wallet_deriv_index = 0;
                     }
 
@@ -534,6 +536,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
                     continue;
                 }
             };
+            first_run = false;
 
             // 1. Generate New Key Pair using Mnemonic and Index
             let key_pair = cardano::derive_key_pair_from_mnemonic(&mnemonic_phrase, cli.mnemonic_account, wallet_deriv_index);
@@ -602,8 +605,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
                     // The outer loop restarts, calling get_challenge_params again.
                 }
                 MiningResult::MiningFailed => {
-                    eprintln!("\n⚠️ Mining cycle failed. Retrying in 1 minute with the SAME index {}.", wallet_deriv_index);
-                    thread::sleep(Duration::from_secs(60));
+                    eprintln!("\n⚠️ Mining cycle failed. Retrying with the SAME index {}.", wallet_deriv_index);
                 }
             }
 
