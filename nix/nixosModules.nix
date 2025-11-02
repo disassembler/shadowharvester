@@ -30,7 +30,8 @@
               options = {
                 api-url = lib.mkOption {
                   type = lib.types.str;
-                  default = "https://sm.midnight.gd/api";
+                  default = "https://scavenger.prod.gd.midnighttge.io";
+                  example = "https://sm.midnight.gd/api";
                 };
 
                 mnemonic-file = lib.mkOption {
