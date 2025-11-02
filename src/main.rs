@@ -521,7 +521,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
             }
 
             // 1. Generate New Key Pair using Mnemonic and Index
-            let key_pair = cardano::derive_key_pair_from_mnemonic(&mnemonic_phrase, wallet_deriv_index);
+            let key_pair = cardano::derive_key_pair_from_mnemonic(&mnemonic_phrase, cli.mnemonic_account, wallet_deriv_index);
             let mining_address = key_pair.2.to_bech32().unwrap();
 
             // 2. Initial Registration (New address must be registered every cycle)

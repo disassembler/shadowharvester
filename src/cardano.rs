@@ -44,7 +44,7 @@ pub fn harden_index(index: u32) -> u32 {
     index | 0x80000000
 }
 
-pub fn derive_key_pair_from_mnemonic(mnemonic: &str, index: u32) -> KeyPairAndAddress {
+pub fn derive_key_pair_from_mnemonic(mnemonic: &str, account: u32, index: u32) -> KeyPairAndAddress {
     // NOTE: This is a simplified, non-compliant derivation for demonstration purposes.
     // A real Cardano application MUST use BIP39/BIP44-compliant HD derivation.
     let bip39 = Mnemonic::parse(mnemonic).expect("Need a valid mnemonic");
@@ -55,11 +55,11 @@ pub fn derive_key_pair_from_mnemonic(mnemonic: &str, index: u32) -> KeyPairAndAd
     pbkdf2(&mut mac, &entropy, ITER, &mut pbkdf2_result);
     let xprv = XPrv::normalize_bytes_force3rd(pbkdf2_result);
 
-    // payment key 1852'/1815'/0'/0/<index>
+    // payment key 1852'/1815'/<account>'/0/<index>
     let pay_xprv = &xprv
         .derive(ed25519_bip32::DerivationScheme::V2, harden_index(1852))
         .derive(ed25519_bip32::DerivationScheme::V2, harden_index(1815))
-        .derive(ed25519_bip32::DerivationScheme::V2, harden_index(0))
+        .derive(ed25519_bip32::DerivationScheme::V2, harden_index(account))
         .derive(ed25519_bip32::DerivationScheme::V2, 0)
         .derive(ed25519_bip32::DerivationScheme::V2, index)
         .extended_secret_key();
