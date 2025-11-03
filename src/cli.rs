@@ -48,6 +48,9 @@ pub struct Cli {
     #[arg(long)]
     pub challenge: Option<String>,
 
+    /// Where to store state (like the mnemonic starting index) and receipts
+    #[arg(long, default_value = ".")]
+    pub data_dir: Option<String>,
 }
 
 

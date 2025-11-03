@@ -57,6 +57,7 @@
               (lib.cli.toGNUCommandLineShell {} (removeAttrs cfg.settings ["mnemonic-file"]))
               (lib.cli.toGNUCommandLine {} (
                 lib.optionalAttrs (cfg.settings.mnemonic-file != null) { mnemonic-file = ''"$CREDENTIALS_DIRECTORY"/mnemonic''; }
+                // lib.optionalAttrs (cfg.settings.data-dir or null == null) { data-dir = ''"$STATE_DIRECTORY"''; }
               ))
             ];
 
@@ -64,8 +65,10 @@
 
             serviceConfig = {
               Type = "exec";
+              StateDirectory = name;
               DynamicUser = true;
               LoadCredential = lib.optional (cfg.settings.mnemonic-file != null) "mnemonic:${cfg.settings.mnemonic-file}";
+              Restart = "always";
             };
           };
         };
