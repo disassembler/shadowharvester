@@ -2,12 +2,14 @@ use shadow_harvester_lib::scavenge;
 use clap::Parser;
 use reqwest;
 use reqwest::blocking;
-use std::thread;
+use std::ffi::OsStr;
+use std::hash::{Hash, Hasher, DefaultHasher};
+use std::{path::PathBuf, thread};
 use std::time::Duration;
 use reqwest::blocking::Client;
 use crate::constants::USER_AGENT;
-use api::{ChallengeResponse, ChallengeData, Statistics, CliChallengeData, parse_cli_challenge_string};
-use chrono::{DateTime, Utc, TimeZone};
+use api::{ChallengeData, Statistics, parse_cli_challenge_string};
+use chrono::{DateTime, Utc};
 use std::process;
 
 // Declare the new API module
@@ -21,12 +23,11 @@ use cli::{Cli, Commands};
 mod constants;
 // Declare the cardano module
 mod cardano;
-use cardano::KeyPairAndAddress; // Import the tuple type
 
 // NEW: Define a result type for the mining cycle
 #[derive(Debug, PartialEq)]
 enum MiningResult {
-    FoundAndSubmitted,
+    FoundAndSubmitted((serde_json::Value, Option<String>)),
     AlreadySolved, // The solution was successfully submitted by someone else
     MiningFailed,  // General mining or submission error (e.g., hash not found, transient API error)
 }
@@ -50,7 +51,7 @@ fn poll_for_active_challenge(
     client: &blocking::Client,
     api_url: &str,
     current_id: &mut String, // Mutate the current ID to track changes
-) -> Result<Option<api::ChallengeData>, String> {
+) -> Result<Option<ChallengeData>, String> {
 
     // Poll the overall status first
     let challenge_response = api::fetch_challenge_status(&client, api_url)?;
@@ -101,7 +102,7 @@ fn get_challenge_params(
     api_url: &str,
     cli_challenge: Option<&String>,
     current_id: &mut String,
-) -> Result<Option<api::ChallengeData>, String> {
+) -> Result<Option<ChallengeData>, String> {
     if let Some(challenge_str) = cli_challenge {
         // --- FIXED CHALLENGE MODE ---
 
@@ -203,7 +204,7 @@ fn run_single_mining_cycle(
     mining_address: String,
     threads: u32,
     donate_to_option: Option<&String>,
-    challenge_params: &api::ChallengeData,
+    challenge_params: &ChallengeData,
     keypair: &cardano::KeyPairAndAddress,
 ) -> (MiningResult, u64, f64) {
     let (found_nonce, total_hashes, elapsed_secs) = scavenge(
@@ -216,54 +217,60 @@ fn run_single_mining_cycle(
         threads,
     );
 
-    let mut mining_result = MiningResult::MiningFailed;
+    let mining_result = match found_nonce {
+        None => {
+            println!("\n⚠️ Scavenging finished, but no solution was found.");
+            MiningResult::MiningFailed // Nonce not found is a general failure
+        },
+        Some(nonce) => {
+            println!("\n✅ Solution found: {}. Submitting...", nonce);
 
-    if let Some(nonce) = found_nonce {
-        println!("\n✅ Solution found: {}. Submitting...", nonce);
+            // 1. Submit solution
+            match api::submit_solution(
+                &client,
+                api_url,
+                &mining_address,
+                &challenge_params.challenge_id,
+                &nonce,
+            ) {
+                Err(e) => {
+                    eprintln!("⚠️ Solution submission failed. Details: {}", e);
 
-        // 1. Submit solution
-        if let Err(e) = api::submit_solution(
-            &client,
-            api_url,
-            &mining_address,
-            &challenge_params.challenge_id,
-            &nonce,
-        ) {
-            eprintln!("⚠️ Solution submission failed. Details: {}", e);
+                    // Check for the specific "already solved" error
+                    if e.contains("Solution already exists") {
+                        MiningResult::AlreadySolved
+                    } else {
+                        // Treat other submission errors as general failure
+                        MiningResult::MiningFailed
+                    }
+                },
+                Ok(receipt) => {
+                    println!("🚀 Submission successful!");
 
-            // Check for the specific "already solved" error
-            if e.contains("Solution already exists") {
-                mining_result = MiningResult::AlreadySolved;
-            } else {
-                // Treat other submission errors as general failure
-                mining_result = MiningResult::MiningFailed;
-            }
-        } else {
-            println!("🚀 Submission successful!");
+                    // 2. Handle donation if required
+                    let donation = donate_to_option.and_then(|ref destination_address| {
+                        // Generate dynamic signature for donation message
+                        let donation_message = format!("Assign accumulated Scavenger rights to: {}", destination_address);
+                        let donation_signature = cardano::cip8_sign(keypair, &donation_message);
 
-            // 2. Handle donation if required
-            if let Some(ref destination_address) = donate_to_option {
+                        api::donate_to(
+                            &client,
+                            api_url,
+                            &mining_address,
+                            destination_address,
+                            &donation_signature.0,
+                        ).map_or_else(|e| {
+                            eprintln!("⚠️ Donation failed. Details: {}", e);
+                            None
+                        }, Some)
+                    });
 
-                // Generate dynamic signature for donation message
-                let donation_message = format!("Assign accumulated Scavenger rights to: {}", destination_address);
-                let donation_signature = cardano::cip8_sign(keypair, &donation_message);
-
-                if let Err(e) = api::donate_to(
-                    &client,
-                    api_url,
-                    &mining_address,
-                    destination_address,
-                    &donation_signature.0,
-                ) {
-                    eprintln!("⚠️ Donation failed. Details: {}", e);
+                    MiningResult::FoundAndSubmitted((receipt, donation)) // Single run successful
                 }
             }
-            mining_result = MiningResult::FoundAndSubmitted; // Single run successful
-        }
-    } else {
-        println!("\n⚠️ Scavenging finished, but no solution was found.");
-        mining_result = MiningResult::MiningFailed; // Nonce not found is a general failure
-    }
+        },
+    };
+
     (mining_result, total_hashes, elapsed_secs)
 }
 
@@ -272,7 +279,7 @@ fn print_mining_setup(
     api_url: &str,
     address: Option<&str>,
     threads: u32,
-    challenge_params: &api::ChallengeData,
+    challenge_params: &ChallengeData,
 ) {
     let address_display = address.unwrap_or("[Not Set / Continuous Generation]");
 
@@ -292,6 +299,96 @@ fn print_mining_setup(
     println!("----------------------------------------------");
 }
 
+enum DataDir<'a> {
+    Persistent(&'a str),
+    Ephemeral(&'a str),
+    Mnemonic(DataDirMnemonic<'a>),
+}
+
+pub const FILE_NAME_CHALLENGE: &str = "challenge.json";
+pub const FILE_NAME_RECEIPT: &str = "receipt.json";
+pub const FILE_NAME_DONATION: &str = "donation.txt";
+
+struct DataDirMnemonic<'a> {
+    mnemonic: &'a str,
+    account: u32,
+    deriv_index: u32,
+}
+
+impl<'a> DataDir<'a> {
+    pub fn challenge_dir(&'a self, base_dir: &str, challenge_id: &str) -> Result<PathBuf, String> {
+        let mut path = PathBuf::from(base_dir);
+        path.push(challenge_id);
+        Ok(path)
+    }
+
+    pub fn receipt_dir(&'a self, base_dir: &str, challenge_id: &str) -> Result<PathBuf, String> {
+        let mut path = self.challenge_dir(base_dir, challenge_id)?;
+
+        match self {
+            DataDir::Persistent(mining_address) => {
+                path.push("persistent");
+                path.push(mining_address);
+            },
+            DataDir::Ephemeral(mining_address) => {
+                path.push("ephemeral");
+                path.push(mining_address);
+            },
+            DataDir::Mnemonic(wallet) => {
+                path.push("mnemonic");
+
+                let mnemonic_hash = {
+                    let mut hasher = DefaultHasher::new();
+                    wallet.mnemonic.hash(&mut hasher);
+                    hasher.finish()
+                };
+                path.push(mnemonic_hash.to_string());
+
+                path.push(&wallet.account.to_string());
+
+                path.push(&wallet.deriv_index.to_string());
+            }
+        }
+
+        std::fs::create_dir_all(&path)
+            .map_err(|e| format!("Could not create challenge directory: {}", e))?;
+
+        Ok(path)
+    }
+
+    pub fn save_challenge(&self, base_dir: &str, challenge: &ChallengeData) -> Result<(), String> {
+        let mut path = self.challenge_dir(base_dir, &challenge.challenge_id)?;
+        path.push(FILE_NAME_CHALLENGE);
+
+        let challenge_json = serde_json::to_string(challenge)
+            .map_err(|e| format!("Could not serialize challenge {}: {}", &challenge.challenge_id, e))?;
+
+        std::fs::write(&path, challenge_json)
+            .map_err(|e| format!("Could not write {}: {}", FILE_NAME_CHALLENGE, e))?;
+
+        Ok(())
+    }
+
+    fn save_receipt(&self, base_dir: &str, challenge_id: &str, receipt: &serde_json::Value, donation: &Option<String>) -> Result<(), String> {
+        let mut path = self.receipt_dir(base_dir, challenge_id)?;
+        path.push(FILE_NAME_RECEIPT);
+
+        let receipt_json = receipt.to_string();
+
+        std::fs::write(&path, &receipt_json)
+            .map_err(|e| format!("Could not write {}: {}", FILE_NAME_RECEIPT, e))?;
+
+        if let Some(donation_id) = donation {
+            path.pop();
+            path.push(FILE_NAME_DONATION);
+
+            std::fs::write(&path, &donation_id)
+                .map_err(|e| format!("Could not write {}: {}", FILE_NAME_DONATION, e))?;
+        }
+
+        Ok(())
+    }
+}
 
 /// Runs the main application logic based on CLI flags.
 fn run_app(cli: Cli) -> Result<(), String> {
@@ -380,6 +477,8 @@ fn run_app(cli: Cli) -> Result<(), String> {
         let mut final_elapsed: f64 = 0.0;
         let reg_message = tc_response.message.clone();
 
+        let data_dir = DataDir::Persistent(&mining_address);
+
         println!("\n[REGISTRATION] Attempting initial registration for address: {}", mining_address);
 
         // Initial Registration (Fatal if first registration fails)
@@ -417,6 +516,10 @@ fn run_app(cli: Cli) -> Result<(), String> {
                 }
             };
 
+            if let Some(ref base_dir) = cli.data_dir {
+                data_dir.save_challenge(base_dir, &challenge_params)?;
+            }
+
             // New active challenge found, start mining
             print_mining_setup(
                 &api_url,
@@ -441,9 +544,19 @@ fn run_app(cli: Cli) -> Result<(), String> {
                 final_elapsed = elapsed_secs;
 
                 match result {
-                    MiningResult::FoundAndSubmitted | MiningResult::AlreadySolved => {
-                        println!("\n✅ Solution submitted or challenge already solved. Stopping current mining.");
-                        // Break inner loop, go back to get_challenge_params (which handles dynamic polling wait or fixed challenge repeat)
+                    MiningResult::FoundAndSubmitted((ref receipt, ref donation)) => {
+                        println!("\n✅ Solution submitted. Stopping current mining.");
+
+                        if let Some(ref base_dir) = cli.data_dir {
+                            data_dir.save_receipt(base_dir, &challenge_params.challenge_id, receipt, donation)?;
+                        }
+
+                        // Break inner loop, outer loop restarts and poll_for_active_challenge will enforce the 5-minute wait.
+                        break;
+                    },
+                    MiningResult::AlreadySolved => {
+                        println!("\n✅ Challenge already solved. Stopping current mining.");
+                        // Break inner loop, outer loop restarts and poll_for_active_challenge will enforce the 5-minute wait.
                         break;
                     }
                     MiningResult::MiningFailed => {
@@ -479,7 +592,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
     }
 
     // --- MODE B: Mnemonic Sequential Mining ---
-    if let Some(mnemonic_phrase) = mnemonic {
+    if let Some(ref mnemonic_phrase) = mnemonic {
 
         let reg_message = tc_response.message.clone();
         // Start at derivation index 0 or CLI flag passed in if resuming
@@ -500,6 +613,12 @@ fn run_app(cli: Cli) -> Result<(), String> {
 
         // Outer Polling loop (robustly checks for challenge changes)
         loop {
+            let data_dir = DataDir::Mnemonic(DataDirMnemonic {
+                mnemonic: mnemonic_phrase,
+                account: cli.mnemonic_account,
+                deriv_index: wallet_deriv_index,
+            });
+
             backoff_challenge.reset();
 
             let old_challenge_id = last_seen_challenge_id.clone();
@@ -508,14 +627,66 @@ fn run_app(cli: Cli) -> Result<(), String> {
             // which is exactly the point of increasing the wallet derivation path index.
             current_challenge_id.clear();
 
+            fn next_wallet_deriv_index_for_challenge(base_dir: &Option<String>, data_dir: &DataDir, challenge_id: &str) -> Result<u32, String> {
+                let initial_deriv_index = match data_dir {
+                    DataDir::Mnemonic(wallet) => wallet.deriv_index,
+                    // Handle other DataDir variants if necessary, or panic/return an error
+                    // for cases where deriv_index is not applicable/available.
+                    // For this specific logic, we assume it's only called with DataDir::Mnemonic.
+                    _ => return Err("next_wallet_deriv_index_for_challenge called with non-Mnemonic DataDir".to_string()),
+                };
+                Ok(if let Some(data_base_dir) = base_dir {
+                    let mut account_dir = data_dir.receipt_dir(data_base_dir, challenge_id)?;
+                    account_dir.pop();
+
+                    let mut indices: Vec<String> = std::fs::read_dir(&account_dir)
+                        .map_err(|e| format!("Could not read the mnemonic's account dir: {}", e))?
+                        .filter_map(|entry| entry.ok().map(|e| e.path()))
+                        .filter(|path| {
+                            let mut receipt_path = path.clone();
+                            receipt_path.push(FILE_NAME_RECEIPT);
+
+                            match std::fs::exists(&receipt_path) {
+                                Err(e) => {
+                                    eprintln!("Could not check for receipt: {}", e);
+                                    true // better to skip an index than to solve the challenge twice
+                                },
+                                Ok(exists) => exists,
+                            }
+                        })
+                        .filter_map(|path| path.file_stem()
+                            .and_then(OsStr::to_str)
+                            .map(ToOwned::to_owned))
+                        .collect();
+
+                    indices.sort();
+
+                    if let Some(highest_index_string) = indices.pop() {
+                        let highest_index = highest_index_string.parse::<u32>()
+                            .map_err(|e| format!("Wallet derivation index directory name is not a positive integer: {}", e))?;
+                        if initial_deriv_index > highest_index {
+                            eprintln!("Using initial deriv_index {} which is higher than highest existing index {}", initial_deriv_index, highest_index);
+                            initial_deriv_index
+                        } else {
+                            highest_index + 1
+                        }
+                    } else {
+                        eprintln!("no highest index: using {}", initial_deriv_index);
+                        initial_deriv_index
+                    }
+                } else {
+                    0
+                })
+            }
+
             // Get challenge parameters (fixed or dynamic)
             let challenge_params = match get_challenge_params(&client, &api_url, cli_challenge_ref, &mut current_challenge_id) {
                 Ok(Some(params)) => {
                     backoff_challenge.reset();
 
                     // Reset index only if we saw a new challenge
-                    if cli_challenge_ref.is_none() && params.challenge_id != old_challenge_id && first_run == false {
-                        wallet_deriv_index = 0;
+                    if first_run || (cli_challenge_ref.is_none() && params.challenge_id != old_challenge_id) {
+                        wallet_deriv_index = next_wallet_deriv_index_for_challenge(&cli.data_dir, &data_dir, &params.challenge_id)?;
                     }
 
                     // Update last seen only on success
@@ -537,6 +708,10 @@ fn run_app(cli: Cli) -> Result<(), String> {
                 }
             };
             first_run = false;
+
+            if let Some(ref base_dir) = cli.data_dir {
+                data_dir.save_challenge(base_dir, &challenge_params)?;
+            }
 
             // 1. Generate New Key Pair using Mnemonic and Index
             let key_pair = cardano::derive_key_pair_from_mnemonic(&mnemonic_phrase, cli.mnemonic_account, wallet_deriv_index);
@@ -599,7 +774,12 @@ fn run_app(cli: Cli) -> Result<(), String> {
 
             // ⭐ CRITICAL: Increment the index only if mining was successful or already solved.
             match result {
-                MiningResult::FoundAndSubmitted | MiningResult::AlreadySolved => {
+                MiningResult::FoundAndSubmitted((receipt, donation)) => {
+                    if let Some(ref base_dir) = cli.data_dir {
+                        data_dir.save_receipt(base_dir, &challenge_params.challenge_id, &receipt, &donation)?;
+                    }
+                },
+                MiningResult::AlreadySolved => {
                     wallet_deriv_index = wallet_deriv_index.wrapping_add(1);
                     println!("\n✅ Cycle complete. Incrementing index to {}.", wallet_deriv_index);
                     // The outer loop restarts, calling get_challenge_params again.
@@ -642,6 +822,12 @@ fn run_app(cli: Cli) -> Result<(), String> {
             let key_pair = cardano::generate_cardano_key_and_address();
             let generated_mining_address = key_pair.2.to_bech32().unwrap();
 
+            let data_dir = DataDir::Ephemeral(&generated_mining_address);
+
+            if let Some(ref base_dir) = cli.data_dir {
+                data_dir.save_challenge(base_dir, &challenge_params)?;
+            }
+
             // 2. Registration (Dynamic Signature)
             println!("\n[CYCLE START] Generated Address: {}", generated_mining_address);
 
@@ -683,8 +869,10 @@ fn run_app(cli: Cli) -> Result<(), String> {
             final_elapsed = elapsed_secs;
 
             match result {
-                MiningResult::FoundAndSubmitted => {
-                    // Success, continue immediately with the next key generation cycle
+                MiningResult::FoundAndSubmitted((receipt, donation)) => {
+                    if let Some(ref base_dir) = cli.data_dir {
+                        data_dir.save_receipt(base_dir, &challenge_params.challenge_id, &receipt, &donation)?;
+                    }
                 }
                 MiningResult::AlreadySolved => {
                     eprintln!("Solution was already accepted by the network. Starting next cycle immediately...");

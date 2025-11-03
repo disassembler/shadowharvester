@@ -1,6 +1,6 @@
 // shadowharvester/src/api.rs
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use reqwest;
 use reqwest::blocking;
 use serde_json;
@@ -23,7 +23,7 @@ pub struct RegistrationReceipt {
     pub registration_receipt: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChallengeData {
     pub challenge_id: String,
     pub difficulty: String,
@@ -51,14 +51,14 @@ pub struct ChallengeResponse { // Made struct public for use in main.rs
     pub next_challenge_starts_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct SolutionReceipt {
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct SolutionReceipt {
     #[serde(rename = "crypto_receipt")]
     pub crypto_receipt: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize)]
-struct DonateResponse {
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct DonateResponse {
     pub status: String,
     #[serde(rename = "donation_id")]
     pub donation_id: String,
@@ -228,7 +228,7 @@ pub fn submit_solution(
     address: &str,
     challenge_id: &str,
     nonce: &str,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     let url = format!(
         "{}/solution/{}/{}/{}",
         api_url,
@@ -248,8 +248,8 @@ pub fn submit_solution(
 
     if status.is_success() {
         // Successful submission
-        let _: SolutionReceipt = response.json().map_err(|e| format!("Failed to parse successful receipt JSON: {}", e))?;
-        Ok(())
+        let receipt: SolutionReceipt = response.json().map_err(|e| format!("Failed to parse successful receipt JSON: {}", e))?;
+        Ok(receipt.crypto_receipt)
     } else {
         // Submission failed (4xx or 5xx)
         let body_text = response.text().unwrap_or_else(|_| format!("Could not read response body for status {}", status));
@@ -277,7 +277,7 @@ pub fn donate_to(
     original_address: &str,
     destination_address: &str,
     donation_signature: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
 
     let url = format!(
         "{}/donate_to/{}/{}/{}",
@@ -301,7 +301,7 @@ pub fn donate_to(
     if status.is_success() {
         let donation_response: DonateResponse = response.json().map_err(|e| format!("Failed to parse successful donation JSON: {}", e))?;
         println!("✅ Donation successful. Donation ID: {}", donation_response.donation_id);
-        Ok(())
+        Ok(donation_response.donation_id)
     } else {
         let body_text = response.text().unwrap_or_else(|_| format!("Could not read response body for status {}", status));
         let api_error: Result<ApiErrorResponse, _> = serde_json::from_str(&body_text);
