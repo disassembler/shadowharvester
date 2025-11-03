@@ -4,3 +4,5 @@ result*
 *.skey
 *.vkey
 *.mnemonic
+challenges.json
+state*

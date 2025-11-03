@@ -628,6 +628,13 @@ fn run_app(cli: Cli) -> Result<(), String> {
             current_challenge_id.clear();
 
             fn next_wallet_deriv_index_for_challenge(base_dir: &Option<String>, data_dir: &DataDir, challenge_id: &str) -> Result<u32, String> {
+                let initial_deriv_index = match data_dir {
+                    DataDir::Mnemonic(wallet) => wallet.deriv_index,
+                    // Handle other DataDir variants if necessary, or panic/return an error
+                    // for cases where deriv_index is not applicable/available.
+                    // For this specific logic, we assume it's only called with DataDir::Mnemonic.
+                    _ => return Err("next_wallet_deriv_index_for_challenge called with non-Mnemonic DataDir".to_string()),
+                };
                 Ok(if let Some(data_base_dir) = base_dir {
                     let mut account_dir = data_dir.receipt_dir(data_base_dir, challenge_id)?;
                     account_dir.pop();
@@ -657,10 +664,15 @@ fn run_app(cli: Cli) -> Result<(), String> {
                     if let Some(highest_index_string) = indices.pop() {
                         let highest_index = highest_index_string.parse::<u32>()
                             .map_err(|e| format!("Wallet derivation index directory name is not a positive integer: {}", e))?;
-                        highest_index + 1
+                        if initial_deriv_index > highest_index {
+                            eprintln!("Using initial deriv_index {} which is higher than highest existing index {}", initial_deriv_index, highest_index);
+                            initial_deriv_index
+                        } else {
+                            highest_index + 1
+                        }
                     } else {
-                        eprintln!("no highest index");
-                        0
+                        eprintln!("no highest index: using {}", initial_deriv_index);
+                        initial_deriv_index
                     }
                 } else {
                     0
