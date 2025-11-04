@@ -1,11 +1,146 @@
 // src/data_types.rs
 
-use serde_json;
 use std::hash::{Hash, Hasher, DefaultHasher};
 use std::path::PathBuf;
-use std::ffi::OsStr;
-use crate::api::ChallengeData;
-use std::io::Write; // Added for file flushing
+use std::io::Write;
+use reqwest::blocking;
+use serde::{Deserialize, Serialize};
+
+// ===============================================
+// API RESPONSE STRUCTS (Moved from src/api.rs)
+// ===============================================
+
+#[derive(Debug, Deserialize)]
+pub struct TandCResponse {
+    pub version: String,
+    pub content: String,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegistrationReceipt {
+    #[serde(rename = "registrationReceipt")]
+    pub registration_receipt: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ChallengeData {
+    pub challenge_id: String,
+    pub difficulty: String,
+    #[serde(rename = "no_pre_mine")]
+    pub no_pre_mine_key: String,
+    #[serde(rename = "no_pre_mine_hour")]
+    pub no_pre_mine_hour_str: String,
+    pub latest_submission: String,
+    // Fields for listing command
+    pub challenge_number: u16,
+    pub day: u8,
+    pub issued_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChallengeResponse {
+    pub code: String,
+    pub challenge: Option<ChallengeData>,
+    pub starts_at: Option<String>,
+    // Fields for listing command (overall status)
+    pub mining_period_ends: Option<String>,
+    pub max_day: Option<u8>,
+    pub total_challenges: Option<u16>,
+    pub current_day: Option<u8>,
+    pub next_challenge_starts_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct SolutionReceipt {
+    #[serde(rename = "crypto_receipt")]
+    pub crypto_receipt: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct DonateResponse {
+    pub status: String,
+    #[serde(rename = "donation_id")]
+    pub donation_id: String,
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct ApiErrorResponse {
+    pub message: String,
+    pub error: Option<String>,
+    // FIX: Change to snake_case and use rename attribute for deserialization
+    #[serde(rename = "statusCode")]
+    pub status_code: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GlobalStatistics {
+    pub wallets: u32,
+    pub challenges: u16,
+    #[serde(rename = "total_challenges")]
+    pub total_challenges: u16,
+    #[serde(rename = "total_crypto_receipts")]
+    pub total_crypto_receipts: u32,
+    #[serde(rename = "recent_crypto_receipts")]
+    pub recent_crypto_receipts: u32,
+}
+
+// Struct for the statistics under the "local" key
+#[derive(Debug, Deserialize)]
+pub struct LocalStatistics {
+    pub crypto_receipts: u32,
+    pub night_allocation: u32,
+}
+
+// Struct representing the entire JSON response from the /statistics/:address endpoint
+#[derive(Debug, Deserialize)]
+pub struct StatisticsApiResponse {
+    pub global: GlobalStatistics,
+    pub local: LocalStatistics,
+}
+
+#[derive(Debug)]
+pub struct Statistics {
+    // Local Address (Added by the client)
+    pub local_address: String,
+    // Global fields
+    pub wallets: u32,
+    pub challenges: u16,
+    pub total_challenges: u16,
+    pub total_crypto_receipts: u32,
+    pub recent_crypto_receipts: u32,
+    // Local fields
+    pub crypto_receipts: u32,
+    pub night_allocation: u32,
+}
+// Struct for the challenge parameters provided via CLI
+#[derive(Debug, Clone)]
+pub struct CliChallengeData {
+    pub challenge_id: String,
+    pub no_pre_mine_key: String,
+    pub difficulty: String,
+    pub no_pre_mine_hour_str: String,
+    pub latest_submission: String,
+}
+
+// ===============================================
+// CORE APPLICATION STRUCTS
+// ===============================================
+
+// NEW STRUCT: Holds the common, validated state for the mining loops.
+#[derive(Debug)]
+pub struct MiningContext<'a> {
+    pub client: blocking::Client,
+    pub api_url: String,
+    // FIX: Use the struct from its new location
+    pub tc_response: TandCResponse,
+    pub donate_to_option: Option<&'a String>,
+    pub threads: u32,
+    pub cli_challenge: Option<&'a String>,
+    pub data_dir: Option<&'a str>,
+}
+
 
 // NEW: Define a result type for the mining cycle
 #[derive(Debug, PartialEq)]
@@ -64,9 +199,9 @@ impl<'a> DataDir<'a> {
                 };
                 path.push(mnemonic_hash.to_string());
 
-                path.push(&wallet.account.to_string());
+                path.push(wallet.account.to_string());
 
-                path.push(&wallet.deriv_index.to_string());
+                path.push(wallet.deriv_index.to_string());
             }
         }
 
@@ -110,7 +245,7 @@ impl<'a> DataDir<'a> {
             path.pop();
             path.push(FILE_NAME_DONATION);
 
-            std::fs::write(&path, &donation_id)
+            std::fs::write(&path, donation_id.as_bytes())
                 .map_err(|e| format!("Could not write {}: {}", FILE_NAME_DONATION, e))?;
         }
 

@@ -12,7 +12,6 @@ use std::sync::mpsc::{Sender, channel};
 use std::{sync::Arc, thread, time::SystemTime};
 use std::sync::atomic::{AtomicBool, Ordering};
 use indicatif::{ProgressBar, ProgressStyle};
-use hex;
 // ************************************
 
 
@@ -131,8 +130,8 @@ impl VM {
         }
 
         let mut digests = init_buffer_digests.chunks(DIGEST_INIT_SIZE);
-        let prog_digest = Blake2b::<512>::new().update(&digests.next().unwrap());
-        let mem_digest = Blake2b::<512>::new().update(&digests.next().unwrap());
+        let prog_digest = Blake2b::<512>::new().update(digests.next().unwrap());
+        let mem_digest = Blake2b::<512>::new().update(digests.next().unwrap());
         let prog_seed = *<&[u8; 64]>::try_from(digests.next().unwrap()).unwrap();
 
         assert_eq!(digests.next(), None);
@@ -524,10 +523,8 @@ fn spin(params: ChallengeParams, sender: Sender<Result>, stop_signal: Arc<Atomic
             return;
         }
 
-        if nonce_value & (CHUNKS_SIZE as u64) == 0 {
-            if sender.send(Result::Progress(CHUNKS_SIZE)).is_err() {
-                 return;
-            }
+        if nonce_value & (CHUNKS_SIZE as u64) == 0 && sender.send(Result::Progress(CHUNKS_SIZE)).is_err() {
+             return;
         }
 
         // Increment nonce by the thread step size
@@ -564,7 +561,7 @@ pub fn scavenge(
                 pre_size: 16 * MB,
                 mixing_numbers: 4,
             },
-            1 * GB,
+            GB,
         );
         println!("{}", rom.digest);
 

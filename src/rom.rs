@@ -101,7 +101,7 @@ impl Rom {
             .update(key)
             .finalize();
 
-        let digest = random_gen(gen_type, seed.try_into().unwrap(), &mut data);
+        let digest = random_gen(gen_type, seed, &mut data);
         Self { digest, data }
     }
 
@@ -195,7 +195,7 @@ pub fn new_debug(key: &[u8], gen_type: RomGenerationType, size: usize) -> RomMix
     };
 
     let mut mixing_buffer = vec![0; pre_size];
-    let seed: [u8; 32] = seed_raw.try_into().unwrap();
+    let seed: [u8; 32] = seed_raw;
     let data = vec![0; size];
     argon2::hprime(&mut mixing_buffer, &seed);
 

@@ -11,8 +11,8 @@ use cryptoxide::{hmac::Hmac, pbkdf2::pbkdf2, sha2::Sha512};
 use minicbor::*;
 
 use rand_core::{OsRng};
-use bip39::{Language, Mnemonic};
-use ed25519_bip32::{self, XPrv, XPub, XPRV_SIZE};
+use bip39::Mnemonic;
+use ed25519_bip32::{self, XPrv, XPRV_SIZE};
 
 pub enum FlexibleSecretKey {
     Standard(SecretKey),
@@ -128,7 +128,7 @@ pub struct CoseSignData<'a> {
     pub payload: &'a [u8],
 }
 
-impl<'a, C> Encode<C> for CoseSignData<'a>
+impl<C> Encode<C> for CoseSignData<'_>
 where
     C: Default,
 {
@@ -150,11 +150,11 @@ pub struct CoseSign1<'a> {
     pub signature: &'a [u8],
 }
 
-impl<'a, C> Encode<C> for CoseSign1<'a>
+impl<C> Encode<C> for CoseSign1<'_>
 where
     C: Default,
 {
-    fn encode<W: encode::Write>(&self, e: &mut Encoder<W>, ctx: &mut C) -> Result<(), encode::Error<W::Error>> {
+    fn encode<W: encode::Write>(&self, e: &mut Encoder<W>, _ctx: &mut C) -> Result<(), encode::Error<W::Error>> {
         e.array(4)?;
         e.bytes(self.protected_header)?;
         e.map(1)?;
@@ -176,7 +176,7 @@ where
 /// but the signature and public key components are guaranteed to be unique.
 pub fn cip8_sign(kp: &KeyPairAndAddress, message: &str) -> (String, String) {
 
-    let pubkey = hex::encode(&kp.1.as_ref());
+    let pubkey = hex::encode(kp.1.as_ref());
     let prot_header = CoseProtHeader {
         address: kp.2.to_vec(),
     };
@@ -185,7 +185,7 @@ pub fn cip8_sign(kp: &KeyPairAndAddress, message: &str) -> (String, String) {
         label: "Signature1",
         protected_header: &cose_prot_cbor,
         external_aad: b"" ,
-        payload: &message.as_bytes(),
+        payload: message.as_bytes(),
     };
     let to_sign_cbor = pallas::codec::minicbor::to_vec(&to_sign).unwrap();
     // The specific error type the compiler couldn't figure out. Let's use &'static str
@@ -207,8 +207,8 @@ pub fn cip8_sign(kp: &KeyPairAndAddress, message: &str) -> (String, String) {
 
     let cose_struct = CoseSign1 {
         protected_header: &cose_prot_cbor,
-        payload: &message.as_bytes(),
-        signature: &sig.as_ref(),
+        payload: message.as_bytes(),
+        signature: sig.as_ref(),
     };
     let cose_sign1_cbor = pallas::codec::minicbor::to_vec(&cose_struct).unwrap();
 

@@ -1,4 +1,4 @@
-// shadowharvester/src/cli.rs
+// src/cli.rs
 
 use clap::{Parser, Subcommand};
 
@@ -24,15 +24,19 @@ pub struct Cli {
     #[arg(long, default_value_t = 24)]
     pub threads: u32,
 
-    /// NEW: Optional secret key (hex-encoded) to mine with. If passed, only solves once.
+    /// Optional secret key (hex-encoded) to mine with.
     #[arg(long)]
     pub payment_key: Option<String>,
 
-    /// NEW: Cardano address (bech32) to donate all accumulated rewards to.
+    /// NEW: Automatically generate a new ephemeral key pair for every mining cycle.
+    #[arg(long)]
+    pub ephemeral_key: bool,
+
+    /// Cardano address (bech32) to donate all accumulated rewards to.
     #[arg(long)]
     pub donate_to: Option<String>,
 
-    /// NEW: 24-word BIP39 mnemonic phrase for sequential address generation.
+    /// 24-word BIP39 mnemonic phrase for sequential address generation.
     #[arg(long)]
     pub mnemonic: Option<String>,
 
@@ -56,7 +60,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
-    /// NEW: Lists the current status and details of the mining challenge.
+    /// Lists the current status and details of the mining challenge.
     #[command(author, about = "List current challenge status")]
     Challenges,
 }
