@@ -1,7 +1,7 @@
 // src/mining.rs
 
 use crate::api;
-use crate::data_types::{DataDir, DataDirMnemonic, MiningContext, MiningResult};
+use crate::data_types::{DataDir, DataDirMnemonic, MiningContext, MiningResult, ChallengeData}; // Added ChallengeData
 use crate::cli::Cli;
 use crate::cardano;
 use crate::utils::{self, next_wallet_deriv_index_for_challenge, print_mining_setup, print_statistics, receipt_exists_for_index, run_single_mining_cycle};
@@ -35,14 +35,28 @@ pub fn run_persistent_key_mining(context: MiningContext, skey_hex: &String) -> R
     if context.donate_to_option.is_some() { println!("Donation Target: {}", context.donate_to_option.unwrap()); }
 
     let mut current_challenge_id = String::new();
+    let mut last_active_challenge_data: Option<ChallengeData> = None; // ADDED: Store last valid challenge data
     loop {
-        let challenge_params = match utils::get_challenge_params(&context.client, &context.api_url, context.cli_challenge, &mut current_challenge_id) {
-            Ok(Some(params)) => params,
+        let challenge_params: ChallengeData = match utils::get_challenge_params(&context.client, &context.api_url, context.cli_challenge, &mut current_challenge_id) {
+            Ok(Some(params)) => {
+                last_active_challenge_data = Some(params.clone()); // Store on success
+                params
+            },
             Ok(None) => continue,
             Err(e) => {
-                eprintln!("⚠️ Critical API Error during challenge check: {}. Retrying in 1 minute...", e);
-                std::thread::sleep(std::time::Duration::from_secs(60));
-                continue;
+                // NEW LOGIC: If a challenge ID is set AND we detect a network failure, continue mining.
+                if !current_challenge_id.is_empty() && e.contains("API request failed") {
+                    eprintln!("⚠️ Challenge API poll failed (Network Error): {}. Continuing mining with previous challenge parameters (ID: {})...", e, current_challenge_id);
+                    // Use the last stored parameters, which must exist if current_challenge_id is set.
+                    last_active_challenge_data.as_ref().cloned().ok_or_else(|| {
+                        format!("FATAL LOGIC ERROR: Challenge ID {} is set but no previous challenge data was stored.", current_challenge_id)
+                    })?
+                } else {
+                    // Otherwise, it's a critical error (non-network failure or no challenge active), so wait and retry poll.
+                    eprintln!("⚠️ Critical API Error during challenge check: {}. Retrying in 1 minute...", e);
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    continue;
+                }
             }
         };
 
@@ -106,6 +120,7 @@ pub fn run_mnemonic_sequential_mining(cli: &Cli, context: MiningContext, mnemoni
     let mut backoff_reg = crate::backoff::Backoff::new(5, 300, 2.0);
     let mut last_seen_challenge_id = String::new();
     let mut current_challenge_id = String::new();
+    let mut last_active_challenge_data: Option<ChallengeData> = None; // ADDED: Store last valid challenge data
 
     println!("\n==============================================");
     println!("⛏️  Shadow Harvester: MNEMONIC SEQUENTIAL MINING Mode ({})", if context.cli_challenge.is_some() { "FIXED CHALLENGE" } else { "DYNAMIC POLLING" });
@@ -118,9 +133,10 @@ pub fn run_mnemonic_sequential_mining(cli: &Cli, context: MiningContext, mnemoni
         let old_challenge_id = last_seen_challenge_id.clone();
         current_challenge_id.clear();
 
-        let challenge_params = match utils::get_challenge_params(&context.client, &context.api_url, context.cli_challenge, &mut current_challenge_id) {
+        let challenge_params: ChallengeData = match utils::get_challenge_params(&context.client, &context.api_url, context.cli_challenge, &mut current_challenge_id) {
             Ok(Some(params)) => {
                 backoff_challenge.reset();
+                last_active_challenge_data = Some(params.clone()); // Store on success
                 if first_run || (context.cli_challenge.is_none() && params.challenge_id != old_challenge_id) {
                     // Create a dummy DataDir with index 0 to calculate the base path for scanning
                     let temp_data_dir = DataDir::Mnemonic(DataDirMnemonic { mnemonic: &mnemonic_phrase, account: cli.mnemonic_account, deriv_index: 0 });
@@ -130,7 +146,20 @@ pub fn run_mnemonic_sequential_mining(cli: &Cli, context: MiningContext, mnemoni
                 params
             },
             Ok(None) => { backoff_challenge.reset(); continue; },
-            Err(e) => { eprintln!("⚠️ Critical API Error during challenge polling: {}. Retrying with exponential backoff...", e); backoff_challenge.sleep(); continue; }
+            Err(e) => {
+                // NEW LOGIC: If a challenge ID is set AND we detect a network failure, continue mining.
+                if !current_challenge_id.is_empty() && e.contains("API request failed") {
+                    eprintln!("⚠️ Challenge API poll failed (Network Error): {}. Continuing mining with previous challenge parameters (ID: {})...", e, current_challenge_id);
+                    backoff_challenge.reset();
+                    last_active_challenge_data.as_ref().cloned().ok_or_else(|| {
+                        format!("FATAL LOGIC ERROR: Challenge ID {} is set but no previous challenge data was stored.", current_challenge_id)
+                    })?
+                } else {
+                    eprintln!("⚠️ Critical API Error during challenge polling: {}. Retrying with exponential backoff...", e);
+                    backoff_challenge.sleep();
+                    continue;
+                }
+            }
         };
         first_run = false;
 
@@ -213,15 +242,27 @@ pub fn run_ephemeral_key_mining(context: MiningContext) -> Result<(), String> {
     let mut final_hashes: u64;
     let mut final_elapsed: f64;
     let mut current_challenge_id = String::new();
+    let mut last_active_challenge_data: Option<ChallengeData> = None; // ADDED: Store last valid challenge data
 
     loop {
-        let challenge_params = match utils::get_challenge_params(&context.client, &context.api_url, context.cli_challenge, &mut current_challenge_id) {
-            Ok(Some(p)) => p,
+        let challenge_params: ChallengeData = match utils::get_challenge_params(&context.client, &context.api_url, context.cli_challenge, &mut current_challenge_id) {
+            Ok(Some(p)) => {
+                last_active_challenge_data = Some(p.clone()); // Store on success
+                p
+            },
             Ok(None) => continue,
             Err(e) => {
-                eprintln!("⚠️ Could not fetch active challenge (Ephemeral Key Mode): {}. Retrying in 5 minutes...", e);
-                std::thread::sleep(std::time::Duration::from_secs(5 * 60));
-                continue;
+                // NEW LOGIC: If a challenge ID is set AND we detect a network failure, continue mining.
+                if !current_challenge_id.is_empty() && e.contains("API request failed") {
+                    eprintln!("⚠️ Challenge API poll failed (Network Error): {}. Continuing mining with previous challenge parameters (ID: {})...", e, current_challenge_id);
+                    last_active_challenge_data.as_ref().cloned().ok_or_else(|| {
+                        format!("FATAL LOGIC ERROR: Challenge ID {} is set but no previous challenge data was stored.", current_challenge_id)
+                    })?
+                } else {
+                    eprintln!("⚠️ Could not fetch active challenge (Ephemeral Key Mode): {}. Retrying in 5 minutes...", e);
+                    std::thread::sleep(std::time::Duration::from_secs(5 * 60));
+                    continue;
+                }
             }
         };
 
