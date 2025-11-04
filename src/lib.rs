@@ -587,8 +587,6 @@ pub fn scavenge(
             // Set start_nonce = thread_id
             let start_nonce = thread_id;
 
-            println!("Starting thread {} with initial nonce: {:016x} and step size: {}", thread_id, start_nonce, step_size);
-
             s.spawn(move || {
                 spin(params, sender, stop_signal, start_nonce, step_size)
             });

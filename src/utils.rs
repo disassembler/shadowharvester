@@ -1,12 +1,11 @@
 // src/utils.rs
 
 use crate::api;
-use crate::backoff::Backoff;
 use crate::cardano;
 use crate::constants::USER_AGENT;
 use crate::data_types::{
     DataDir, DataDirMnemonic, MiningContext, MiningResult, FILE_NAME_RECEIPT,
-    ChallengeData, Statistics, TandCResponse, ChallengeResponse // FIX: Import ChallengeResponse
+    ChallengeData, Statistics, TandCResponse, ChallengeResponse, PendingSolution, FILE_NAME_FOUND_SOLUTION
 };
 use reqwest::blocking::{self, Client};
 use std::ffi::OsStr;
@@ -192,13 +191,11 @@ pub fn print_statistics(stats_result: Result<Statistics, String>, total_hashes: 
 }
 
 pub fn run_single_mining_cycle(
-    client: &blocking::Client,
-    api_url: &str,
     mining_address: String,
     threads: u32,
     donate_to_option: Option<&String>,
     challenge_params: &ChallengeData,
-    keypair: &cardano::KeyPairAndAddress,
+    data_dir_base: Option<&str>,
 ) -> (MiningResult, u64, f64) {
     let (found_nonce, total_hashes, elapsed_secs) = shadow_harvester_lib::scavenge(
         mining_address.clone(),
@@ -216,56 +213,50 @@ pub fn run_single_mining_cycle(
             MiningResult::MiningFailed
         },
         Some(nonce) => {
-            println!("\n✅ Solution found: {}. Submitting...", nonce);
+            println!("\n✅ Solution found: {}. Saving solution to temporary storage...", nonce);
 
-            // NEW: Initialize backoff strategy for submission retries
-            let mut backoff = Backoff::new(5, 300, 2.0); // min 5s, max 300s, 2.0 factor
-
-            let submission_result = loop {
-                match api::submit_solution(
-                    client, api_url, &mining_address, &challenge_params.challenge_id, &nonce,
-                ) {
-                    Ok(receipt) => {
-                        // Success: break the submission loop
-                        break Ok(receipt);
-                    },
-                    Err(e) if e.contains("Network/Client Error") => {
-                        // Recoverable Error (Timeout, DNS, etc.): retry with backoff
-                        eprintln!("⚠️ Solution submission failed (Network Error): {}. Retrying...", e);
-                        backoff.sleep();
-                        continue;
-                    },
-                    Err(e) => {
-                        // Non-recoverable Error (API Validation, Already Solved): break the submission loop
-                        eprintln!("⚠️ Solution submission failed (API/Validation Error). Details: {}", e);
-                        if e.contains("Solution already exists") {
-                            break Err(MiningResult::AlreadySolved);
-                        } else {
-                            break Err(MiningResult::MiningFailed);
-                        }
-                    }
-                }
+            // SIMPLIFIED PendingSolution
+            let pending_solution = PendingSolution {
+                address: mining_address.clone(),
+                challenge_id: challenge_params.challenge_id.clone(),
+                nonce: nonce.clone(),
+                donation_address: donate_to_option.cloned(),
             };
 
-            match submission_result {
-                Ok(receipt) => {
-                    // Submission successful after one or more retries
-                    println!("🚀 Submission successful!");
-                    let donation = donate_to_option.and_then(|ref destination_address| {
-                        let donation_message = format!("Assign accumulated Scavenger rights to: {}", destination_address);
-                        let donation_signature = cardano::cip8_sign(keypair, &donation_message);
-                        api::donate_to(
-                            client, api_url, &mining_address, destination_address, &donation_signature.0,
-                        ).map_or_else(|e| {
-                            eprintln!("⚠️ Donation failed. Details: {}", e);
-                            None
-                        }, Some)
-                    });
-                    MiningResult::FoundAndSubmitted((receipt, donation))
+
+            // CRITICAL STEP 1: Save to a temporary 'found' file first for crash recovery
+            if let Some(base_dir) = data_dir_base {
+                let temp_data_dir = DataDir::Ephemeral(&mining_address);
+                if let Err(e) = temp_data_dir.save_found_solution(base_dir, &challenge_params.challenge_id, &pending_solution) {
+                     eprintln!("FATAL: Solution found but could not save recovery file {}: {}", FILE_NAME_FOUND_SOLUTION, e);
+                     return (MiningResult::MiningFailed, total_hashes, elapsed_secs);
                 }
-                Err(e) => e, // AlreadySolved or MiningFailed from the submission logic
+            } else {
+                // If no data_dir is set, the solution is lost.
+                eprintln!("FATAL: Solution found but no data_dir specified. Solution lost.");
+                return (MiningResult::MiningFailed, total_hashes, elapsed_secs);
             }
-        },
+
+            // CRITICAL STEP 2: Move from temporary file to persistent queue
+            if let Some(base_dir) = data_dir_base {
+                let temp_data_dir = DataDir::Ephemeral(&mining_address);
+                if let Err(e) = temp_data_dir.save_pending_solution(base_dir, &pending_solution) {
+                     eprintln!("FATAL: Solution found but could not save to queue: {}", e);
+                     // If queue save fails, the recovery file is still there, so we return MiningFailed.
+                     return (MiningResult::MiningFailed, total_hashes, elapsed_secs);
+                }
+
+                // CRITICAL STEP 3: If save to queue is successful, delete the temporary file
+                if let Err(e) = temp_data_dir.delete_found_solution(base_dir, &challenge_params.challenge_id) {
+                    eprintln!("WARNING: Failed to delete recovery file {}: {}", FILE_NAME_FOUND_SOLUTION, e);
+                }
+
+                println!("🚀 Solution queued successfully. Mining continues.");
+            }
+            // else case is handled above and returns MiningFailed
+
+            MiningResult::FoundAndQueued
+        }
     };
     (mining_result, total_hashes, elapsed_secs)
 }
@@ -387,7 +378,7 @@ pub fn setup_app(cli: &crate::cli::Cli) -> Result<MiningContext<'_>, String> {
         return Err("Cannot use both '--mnemonic' and '--mnemonic-file' flags simultaneously.".to_string());
     }
 
-    // NEW VALIDATION: Ephemeral key conflicts with payment key and mnemonic
+    // Ephemeral key conflicts with payment key and mnemonic
     if cli.ephemeral_key {
         if cli.payment_key.is_some() {
              return Err("Cannot use '--ephemeral-key' with '--payment-key' simultaneously.".to_string());

@@ -1,5 +1,5 @@
 [package]
-name = "shadow-harvester" # 🚨 NEW: The project and library name
+name = "shadow-harvester"
 version = "0.1.0"
 edition = "2024"
 license = "MIT Or Apache-2.0"

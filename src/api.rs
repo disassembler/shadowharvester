@@ -22,7 +22,6 @@ pub fn fetch_tandc(client: &blocking::Client, api_url: &str) -> Result<TandCResp
     response.json()
 }
 
-// NEW FUNCTION: Parses the comma-separated CLI challenge string
 pub fn parse_cli_challenge_string(challenge_str: &str) -> Result<CliChallengeData, String> {
     let parts: Vec<&str> = challenge_str.split(',').collect();
 
@@ -44,7 +43,6 @@ pub fn parse_cli_challenge_string(challenge_str: &str) -> Result<CliChallengeDat
 
 
 /// Performs the POST /register call using key/signature arguments.
-// RENAMED from register_address_mock
 pub fn register_address(
     client: &blocking::Client,
     api_url: &str,
@@ -139,7 +137,6 @@ pub fn submit_solution(
 }
 
 /// Performs the POST /donate_to call.
-// RENAMED from donate_to_mock
 pub fn donate_to(
     client: &blocking::Client,
     api_url: &str,
@@ -187,7 +184,6 @@ pub fn donate_to(
 }
 
 /// Fetches the raw Challenge Response object from the API.
-// NEW FUNCTION
 pub fn fetch_challenge_status(client: &blocking::Client, api_url: &str) -> Result<ChallengeResponse, String> {
     let url = format!("{}/challenge", api_url);
 
@@ -202,7 +198,6 @@ pub fn fetch_challenge_status(client: &blocking::Client, api_url: &str) -> Resul
 }
 
 /// Fetches and validates the active challenge parameters, returning data only if active.
-// RENAMED from fetch_challenge
 pub fn get_active_challenge_data(client: &blocking::Client, api_url: &str) -> Result<ChallengeData, String> {
     let challenge_response = fetch_challenge_status(client, api_url)?;
 
