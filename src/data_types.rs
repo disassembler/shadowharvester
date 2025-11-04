@@ -128,7 +128,7 @@ pub struct CliChallengeData {
 // CORE APPLICATION STRUCTS
 // ===============================================
 
-// NEW STRUCT: Holds the common, validated state for the mining loops.
+// Holds the common, validated state for the mining loops.
 #[derive(Debug)]
 pub struct MiningContext<'a> {
     pub client: blocking::Client,
@@ -142,10 +142,20 @@ pub struct MiningContext<'a> {
 }
 
 
-// NEW: Define a result type for the mining cycle
+// Holds the data needed to submit a solution later.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PendingSolution {
+    pub address: String,
+    pub challenge_id: String,
+    pub nonce: String,
+    pub donation_address: Option<String>, // RE-ADDED this field
+}
+
+// Define a result type for the mining cycle
 #[derive(Debug, PartialEq)]
 pub enum MiningResult {
-    FoundAndSubmitted((serde_json::Value, Option<String>)),
+    FoundAndQueued, // Solution found and saved to local queue
+    #[allow(dead_code)] // The submitter thread produces this result conceptually when processing a queue item, but the miner never constructs it.
     AlreadySolved, // The solution was successfully submitted by someone else
     MiningFailed,  // General mining or submission error (e.g., hash not found, transient API error)
 }
@@ -154,6 +164,8 @@ pub enum MiningResult {
 pub const FILE_NAME_CHALLENGE: &str = "challenge.json";
 pub const FILE_NAME_RECEIPT: &str = "receipt.json";
 pub const FILE_NAME_DONATION: &str = "donation.txt";
+// Removed: FILE_NAME_PENDING_SOLUTION is unused, path is derived from QUEUE_BASE_DIR
+pub const FILE_NAME_FOUND_SOLUTION: &str = "found.json"; // (Crash recovery file)
 
 
 #[derive(Debug, Clone, Copy)]
@@ -224,31 +236,98 @@ impl<'a> DataDir<'a> {
         Ok(())
     }
 
-    pub fn save_receipt(&self, base_dir: &str, challenge_id: &str, receipt: &serde_json::Value, donation: &Option<String>) -> Result<(), String> {
+    // Only saves the receipt, donation logic removed
+    pub fn save_receipt(&self, base_dir: &str, challenge_id: &str, receipt: &serde_json::Value) -> Result<(), String> {
         let mut path = self.receipt_dir(base_dir, challenge_id)?;
         path.push(FILE_NAME_RECEIPT);
 
         let receipt_json = receipt.to_string();
 
-        // FIX: Use explicit file handling and sync to guarantee persistence.
         let mut file = std::fs::File::create(&path)
             .map_err(|e| format!("Could not create {}: {}", FILE_NAME_RECEIPT, e))?;
 
         file.write_all(receipt_json.as_bytes())
             .map_err(|e| format!("Could not write to {}: {}", FILE_NAME_RECEIPT, e))?;
 
-        // CRITICAL: Force the OS to write the data to disk now.
         file.sync_all()
             .map_err(|e| format!("Could not sync {}: {}", FILE_NAME_RECEIPT, e))?;
 
-        if let Some(donation_id) = donation {
-            path.pop();
-            path.push(FILE_NAME_DONATION);
-
-            std::fs::write(&path, donation_id.as_bytes())
-                .map_err(|e| format!("Could not write {}: {}", FILE_NAME_DONATION, e))?;
-        }
+        // Donation file logic is intentionally removed here.
 
         Ok(())
     }
+
+    // Saves a PendingSolution to the queue directory
+    pub fn save_pending_solution(&self, base_dir: &str, solution: &PendingSolution) -> Result<(), String> {
+        let mut path = PathBuf::from(base_dir);
+        path.push("pending_submissions"); // Dedicated directory for the queue
+        std::fs::create_dir_all(&path)
+            .map_err(|e| format!("Could not create pending_submissions directory: {}", e))?;
+
+        // Use a unique file name based on challenge, address, and nonce
+        path.push(format!("{}_{}_{}.json", solution.address, solution.challenge_id, solution.nonce));
+
+        let solution_json = serde_json::to_string(solution)
+            .map_err(|e| format!("Could not serialize pending solution: {}", e))?;
+
+        std::fs::write(&path, solution_json)
+            .map_err(|e| format!("Could not write pending solution file: {}", e))?;
+
+        Ok(())
+    }
+
+    // Saves the temporary file indicating a solution was found but not queued/submitted
+    pub fn save_found_solution(&self, base_dir: &str, challenge_id: &str, solution: &PendingSolution) -> Result<(), String> {
+        let mut path = self.receipt_dir(base_dir, challenge_id)?; // Use receipt dir for local persistence
+        path.push(FILE_NAME_FOUND_SOLUTION);
+
+        let solution_json = serde_json::to_string(solution)
+            .map_err(|e| format!("Could not serialize found solution: {}", e))?;
+
+        // Use explicit file handling to guarantee persistence before returning success
+        let mut file = std::fs::File::create(&path)
+            .map_err(|e| format!("Could not create {}: {}", FILE_NAME_FOUND_SOLUTION, e))?;
+
+        file.write_all(solution_json.as_bytes())
+            .map_err(|e| format!("Could not write to {}: {}", FILE_NAME_FOUND_SOLUTION, e))?;
+
+        file.sync_all()
+            .map_err(|e| format!("Could not sync {}: {}", FILE_NAME_FOUND_SOLUTION, e))?;
+
+        Ok(())
+    }
+
+    // Removes the temporary file
+    pub fn delete_found_solution(&self, base_dir: &str, challenge_id: &str) -> Result<(), String> {
+        let mut path = self.receipt_dir(base_dir, challenge_id)?;
+        path.push(FILE_NAME_FOUND_SOLUTION);
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("Failed to delete {}: {}", FILE_NAME_FOUND_SOLUTION, e))?;
+        }
+        Ok(())
+    }
+}
+
+// Checks if an address/challenge has a pending submission file in the queue dir
+pub fn is_solution_pending_in_queue(base_dir: &str, address: &str, challenge_id: &str) -> Result<bool, String> {
+    use std::path::PathBuf;
+
+    let mut path = PathBuf::from(base_dir);
+    path.push("pending_submissions");
+
+    // Scan for any file that matches the address and challenge ID prefix
+    if let Ok(entries) = std::fs::read_dir(&path) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            if let Some(filename) = entry.file_name().to_str() {
+                // Check if the filename starts with the required prefix and is a JSON file
+                // The filename format is: address_challenge_id_nonce.json
+                if filename.starts_with(&format!("{}_{}_", address, challenge_id)) && filename.ends_with(".json") {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    // If the directory doesn't exist or no matching file is found
+    Ok(false)
 }

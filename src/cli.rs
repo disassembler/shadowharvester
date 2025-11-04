@@ -28,7 +28,7 @@ pub struct Cli {
     #[arg(long)]
     pub payment_key: Option<String>,
 
-    /// NEW: Automatically generate a new ephemeral key pair for every mining cycle.
+    /// Automatically generate a new ephemeral key pair for every mining cycle.
     #[arg(long)]
     pub ephemeral_key: bool,
 

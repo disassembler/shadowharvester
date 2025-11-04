@@ -1,6 +1,7 @@
 // src/main.rs - Final Minimal Version
 
 use clap::Parser;
+use std::thread; // ADDED
 
 // Declare modules
 mod api;
@@ -11,6 +12,7 @@ mod cardano;
 mod data_types;
 mod utils; // The helpers module
 mod mining;
+mod submitter;
 
 use mining::{run_persistent_key_mining, run_mnemonic_sequential_mining, run_ephemeral_key_mining};
 use utils::{setup_app, print_mining_setup}; // Importing refactored helpers
@@ -26,6 +28,27 @@ fn run_app(cli: Cli) -> Result<(), String> {
         Err(e) if e == "COMMAND EXECUTED" => return Ok(()),
         Err(e) => return Err(e),
     };
+
+    // --- Start Background Submitter Thread ---
+    // Clone client, API URL, and data_dir for the background thread
+    let submitter_handle = if let Some(base_dir) = context.data_dir {
+        let client_clone = context.client.clone();
+        let api_url_clone = context.api_url.clone();
+        let data_dir_clone = base_dir.to_string();
+
+        println!("📦 Starting background submitter thread...");
+        let handle = thread::spawn(move || {
+            match submitter::run_submitter_thread(client_clone, api_url_clone, data_dir_clone) {
+                Ok(_) => {},
+                Err(e) => eprintln!("FATAL SUBMITTER ERROR: {}", e),
+            }
+        });
+        Some(handle)
+    } else {
+        println!("⚠️ No --data-dir specified. Submissions will be synchronous (blocking) and lost on API error.");
+        None
+    };
+    // ---------------------------------------------
 
     // --- Pre-extract mnemonic logic ---
     let mnemonic: Option<String> = if let Some(mnemonic) = cli.mnemonic.clone() {
@@ -56,7 +79,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
     }
 
     // 2. Determine Operation Mode and Start Mining
-    if let Some(skey_hex) = cli.payment_key.as_ref() {
+    let result = if let Some(skey_hex) = cli.payment_key.as_ref() {
         // Mode A: Persistent Key Mining
         run_persistent_key_mining(context, skey_hex)
     }
@@ -70,7 +93,12 @@ fn run_app(cli: Cli) -> Result<(), String> {
     } else {
         // This should be unreachable due to the validation in utils::setup_app
         Ok(())
-    }
+    };
+
+    // NOTE: In a production app, you would join the submitter thread here.
+    // if let Some(handle) = submitter_handle { handle.join().unwrap(); }
+
+    result
 }
 
 fn main() {
