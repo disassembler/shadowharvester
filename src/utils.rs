@@ -1,6 +1,7 @@
 // src/utils.rs
 
 use crate::api;
+use crate::backoff::Backoff;
 use crate::cardano;
 use crate::constants::USER_AGENT;
 use crate::data_types::{
@@ -216,18 +217,39 @@ pub fn run_single_mining_cycle(
         },
         Some(nonce) => {
             println!("\n✅ Solution found: {}. Submitting...", nonce);
-            match api::submit_solution(
-                client, api_url, &mining_address, &challenge_params.challenge_id, &nonce,
-            ) {
-                Err(e) => {
-                    eprintln!("⚠️ Solution submission failed. Details: {}", e);
-                    if e.contains("Solution already exists") {
-                        MiningResult::AlreadySolved
-                    } else {
-                        MiningResult::MiningFailed
+
+            // NEW: Initialize backoff strategy for submission retries
+            let mut backoff = Backoff::new(5, 300, 2.0); // min 5s, max 300s, 2.0 factor
+
+            let submission_result = loop {
+                match api::submit_solution(
+                    client, api_url, &mining_address, &challenge_params.challenge_id, &nonce,
+                ) {
+                    Ok(receipt) => {
+                        // Success: break the submission loop
+                        break Ok(receipt);
+                    },
+                    Err(e) if e.contains("Network/Client Error") => {
+                        // Recoverable Error (Timeout, DNS, etc.): retry with backoff
+                        eprintln!("⚠️ Solution submission failed (Network Error): {}. Retrying...", e);
+                        backoff.sleep();
+                        continue;
+                    },
+                    Err(e) => {
+                        // Non-recoverable Error (API Validation, Already Solved): break the submission loop
+                        eprintln!("⚠️ Solution submission failed (API/Validation Error). Details: {}", e);
+                        if e.contains("Solution already exists") {
+                            break Err(MiningResult::AlreadySolved);
+                        } else {
+                            break Err(MiningResult::MiningFailed);
+                        }
                     }
-                },
+                }
+            };
+
+            match submission_result {
                 Ok(receipt) => {
+                    // Submission successful after one or more retries
                     println!("🚀 Submission successful!");
                     let donation = donate_to_option.and_then(|ref destination_address| {
                         let donation_message = format!("Assign accumulated Scavenger rights to: {}", destination_address);
@@ -241,6 +263,7 @@ pub fn run_single_mining_cycle(
                     });
                     MiningResult::FoundAndSubmitted((receipt, donation))
                 }
+                Err(e) => e, // AlreadySolved or MiningFailed from the submission logic
             }
         },
     };
