@@ -390,6 +390,84 @@ impl<'a> DataDir<'a> {
     }
 }
 
+fn next_wallet_deriv_index_for_challenge(
+    base_dir: &Option<String>,
+    challenge_id: &str,
+    data_dir_for_path: &DataDir
+) -> Result<u32, String> {
+
+    // Always start from 0 for the check
+    const START_INDEX: u32 = 0;
+
+    Ok(if let Some(data_base_dir) = base_dir {
+
+        let temp_data_dir_mnemonic = match data_dir_for_path {
+            DataDir::Mnemonic(wallet) => DataDir::Mnemonic(DataDirMnemonic {
+                mnemonic: wallet.mnemonic,
+                account: wallet.account,
+                deriv_index: 0,
+            }),
+            _ => return Err("next_wallet_deriv_index_for_challenge called with non-Mnemonic DataDir".to_string()),
+        };
+
+        let mut account_dir = temp_data_dir_mnemonic.receipt_dir(data_base_dir, challenge_id)?;
+        account_dir.pop();
+
+        // --- GATHER AND PARSE INDICES ---
+        let mut parsed_indices: Vec<u32> = std::fs::read_dir(&account_dir)
+            .map_err(|e| format!("Could not read the mnemonic's account dir: {}", e))?
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|path| {
+                // Check if the directory path points to a valid index directory
+                path.file_stem().and_then(OsStr::to_str).and_then(|s| s.parse::<u32>().ok()).is_some()
+            })
+            .filter(|path| {
+                // Check if the receipt file exists inside this index directory
+                let mut receipt_path = path.clone();
+                receipt_path.push(FILE_NAME_RECEIPT);
+
+                match std::fs::exists(&receipt_path) {
+                    Err(e) => {
+                        eprintln!("Could not check for receipt at {:?}: {}", path, e);
+                        true // Treat error as receipt existing to avoid retrying a potentially problematic index
+                    },
+                    Ok(exists) => exists,
+                }
+            })
+            .filter_map(|path| path.file_stem()
+                .and_then(OsStr::to_str)
+                .and_then(|s| s.parse::<u32>().ok()))
+            .collect();
+
+        parsed_indices.sort();
+
+        if parsed_indices.is_empty() {
+            eprintln!("no highest index: using {}", START_INDEX);
+            START_INDEX
+        } else {
+            // --- CHECK FOR GAPS ---
+            let mut expected_index = START_INDEX;
+            for &index in parsed_indices.iter() {
+                if index > expected_index {
+                    // Gap found: an index is missing a receipt. Return the missing index.
+                    eprintln!("Gap found in receipts. Highest continuous index is {}. Retrying missing index {}.", expected_index.wrapping_sub(1), expected_index);
+                    return Ok(expected_index);
+                }
+                // Move to the next expected index
+                expected_index = index.wrapping_add(1);
+            }
+
+            // --- NO GAPS FOUND ---
+            // The next index to mine is the one that was *expected* after the last saved index.
+            expected_index
+        }
+    } else {
+        // If no data_dir is provided, always start at 0.
+        START_INDEX
+    })
+}
+
+
 /// Runs the main application logic based on CLI flags.
 fn run_app(cli: Cli) -> Result<(), String> {
     // 1. Check for --api-url
@@ -510,8 +588,8 @@ fn run_app(cli: Cli) -> Result<(), String> {
                 Ok(Some(params)) => params,
                 Ok(None) => continue, // Continue polling after sleep/wait
                 Err(e) => {
-                    eprintln!("⚠️ Critical API Error during challenge check: {}. Retrying in 5 minutes...", e);
-                    thread::sleep(Duration::from_secs(5 * 60));
+                    eprintln!("⚠️ Critical API Error during challenge check: {}. Retrying in 1 minute...", e);
+                    thread::sleep(Duration::from_secs(60));
                     continue;
                 }
             };
@@ -595,8 +673,8 @@ fn run_app(cli: Cli) -> Result<(), String> {
     if let Some(ref mnemonic_phrase) = mnemonic {
 
         let reg_message = tc_response.message.clone();
-        // Start at derivation index 0 or CLI flag passed in if resuming
-        let mut wallet_deriv_index: u32 = cli.mnemonic_starting_index;
+        // ⭐ REMOVED cli.mnemonic_starting_index, now initialized to 0 implicitly via gap check
+        let mut wallet_deriv_index: u32 = 0;
         let mut first_run = true;
         let mut max_registered_index = None;
         let mut backoff_challenge = Backoff::new(5, 300, 2.0);
@@ -613,6 +691,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
 
         // Outer Polling loop (robustly checks for challenge changes)
         loop {
+            // DataDir is constructed with the current index, used for the current wallet and for path generation in the gap check.
             let data_dir = DataDir::Mnemonic(DataDirMnemonic {
                 mnemonic: mnemonic_phrase,
                 account: cli.mnemonic_account,
@@ -627,66 +706,20 @@ fn run_app(cli: Cli) -> Result<(), String> {
             // which is exactly the point of increasing the wallet derivation path index.
             current_challenge_id.clear();
 
-            fn next_wallet_deriv_index_for_challenge(base_dir: &Option<String>, data_dir: &DataDir, challenge_id: &str) -> Result<u32, String> {
-                let initial_deriv_index = match data_dir {
-                    DataDir::Mnemonic(wallet) => wallet.deriv_index,
-                    // Handle other DataDir variants if necessary, or panic/return an error
-                    // for cases where deriv_index is not applicable/available.
-                    // For this specific logic, we assume it's only called with DataDir::Mnemonic.
-                    _ => return Err("next_wallet_deriv_index_for_challenge called with non-Mnemonic DataDir".to_string()),
-                };
-                Ok(if let Some(data_base_dir) = base_dir {
-                    let mut account_dir = data_dir.receipt_dir(data_base_dir, challenge_id)?;
-                    account_dir.pop();
-
-                    let mut indices: Vec<String> = std::fs::read_dir(&account_dir)
-                        .map_err(|e| format!("Could not read the mnemonic's account dir: {}", e))?
-                        .filter_map(|entry| entry.ok().map(|e| e.path()))
-                        .filter(|path| {
-                            let mut receipt_path = path.clone();
-                            receipt_path.push(FILE_NAME_RECEIPT);
-
-                            match std::fs::exists(&receipt_path) {
-                                Err(e) => {
-                                    eprintln!("Could not check for receipt: {}", e);
-                                    true // better to skip an index than to solve the challenge twice
-                                },
-                                Ok(exists) => exists,
-                            }
-                        })
-                        .filter_map(|path| path.file_stem()
-                            .and_then(OsStr::to_str)
-                            .map(ToOwned::to_owned))
-                        .collect();
-
-                    indices.sort();
-
-                    if let Some(highest_index_string) = indices.pop() {
-                        let highest_index = highest_index_string.parse::<u32>()
-                            .map_err(|e| format!("Wallet derivation index directory name is not a positive integer: {}", e))?;
-                        if initial_deriv_index > highest_index {
-                            eprintln!("Using initial deriv_index {} which is higher than highest existing index {}", initial_deriv_index, highest_index);
-                            initial_deriv_index
-                        } else {
-                            highest_index + 1
-                        }
-                    } else {
-                        eprintln!("no highest index: using {}", initial_deriv_index);
-                        initial_deriv_index
-                    }
-                } else {
-                    0
-                })
-            }
-
             // Get challenge parameters (fixed or dynamic)
             let challenge_params = match get_challenge_params(&client, &api_url, cli_challenge_ref, &mut current_challenge_id) {
                 Ok(Some(params)) => {
                     backoff_challenge.reset();
 
-                    // Reset index only if we saw a new challenge
+                    // ⭐ Index reset logic simplified: Always check for the next index from 0 on a new challenge
                     if first_run || (cli_challenge_ref.is_none() && params.challenge_id != old_challenge_id) {
-                        wallet_deriv_index = next_wallet_deriv_index_for_challenge(&cli.data_dir, &data_dir, &params.challenge_id)?;
+
+                        // ⭐ Simplified call: default_start_index is always 0, as per request
+                        wallet_deriv_index = next_wallet_deriv_index_for_challenge(
+                            &cli.data_dir,
+                            &params.challenge_id,
+                            &data_dir
+                        )?;
                     }
 
                     // Update last seen only on success
@@ -778,10 +811,13 @@ fn run_app(cli: Cli) -> Result<(), String> {
                     if let Some(ref base_dir) = cli.data_dir {
                         data_dir.save_receipt(base_dir, &challenge_params.challenge_id, &receipt, &donation)?;
                     }
+                    // Index must be incremented after a successful submit
+                    wallet_deriv_index = wallet_deriv_index.wrapping_add(1);
+                    println!("\n✅ Solution submitted. Incrementing index to {}.", wallet_deriv_index);
                 },
                 MiningResult::AlreadySolved => {
                     wallet_deriv_index = wallet_deriv_index.wrapping_add(1);
-                    println!("\n✅ Cycle complete. Incrementing index to {}.", wallet_deriv_index);
+                    println!("\n✅ Challenge already solved. Incrementing index to {}.", wallet_deriv_index);
                     // The outer loop restarts, calling get_challenge_params again.
                 }
                 MiningResult::MiningFailed => {
