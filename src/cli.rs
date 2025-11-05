@@ -55,6 +55,14 @@ pub struct Cli {
     /// Where to store state (like the mnemonic starting index) and receipts
     #[arg(long, default_value = ".")]
     pub data_dir: Option<String>,
+
+    /// Path to wallets.json file containing multiple wallets to mine with
+    #[arg(long)]
+    pub wallets_file: Option<String>,
+
+    /// Number of wallets to mine concurrently (only used with --wallets-file)
+    #[arg(long, default_value_t = 1)]
+    pub concurrent_wallets: usize,
 }
 
 

@@ -125,6 +125,33 @@ pub struct CliChallengeData {
 }
 
 // ===============================================
+// WALLET FILE STRUCTS
+// ===============================================
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct WalletEntry {
+    pub id: u32,
+    pub name: String,
+    pub mnemonic: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default)]
+    pub profile_dir: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub total_solved: u32,
+    #[serde(default)]
+    pub total_unsolved: u32,
+    #[serde(default)]
+    pub estimated_tokens: String,
+    #[serde(default)]
+    pub last_updated: String,
+}
+
+// ===============================================
 // CORE APPLICATION STRUCTS
 // ===============================================
 

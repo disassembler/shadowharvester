@@ -412,3 +412,202 @@ pub fn run_ephemeral_key_mining(context: MiningContext) -> Result<(), String> {
         println!("\n[CYCLE END] Starting next mining cycle immediately...");
     }
 }
+
+/// Mines with multiple wallets concurrently, rotating them as challenges are solved
+pub fn run_concurrent_wallets_mining(
+    context: MiningContext,
+    wallets: Vec<crate::data_types::WalletEntry>,
+    concurrent_count: usize,
+) -> Result<(), String> {
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    println!("\n🚀 Starting concurrent wallet mining mode");
+    println!("Total wallets: {}", wallets.len());
+    println!("Concurrent wallets: {}", concurrent_count);
+
+    let base_dir = context.data_dir.unwrap_or(".");
+
+    // Shared state: index of next wallet to use
+    let next_wallet_index = Arc::new(Mutex::new(0usize));
+    let total_wallets = wallets.len();
+
+    // Wrap wallets in Arc for sharing across threads
+    let wallets_arc = Arc::new(wallets);
+
+    loop {
+        // Get current challenge
+        let challenge_params = match context.cli_challenge {
+            Some(challenge_str) => {
+                let cli_challenge_data = api::parse_cli_challenge_string(challenge_str)?;
+                ChallengeData {
+                    challenge_id: cli_challenge_data.challenge_id,
+                    difficulty: cli_challenge_data.difficulty,
+                    no_pre_mine_key: cli_challenge_data.no_pre_mine_key,
+                    no_pre_mine_hour_str: cli_challenge_data.no_pre_mine_hour_str,
+                    latest_submission: cli_challenge_data.latest_submission,
+                    challenge_number: 0,
+                    day: 0,
+                    issued_at: String::new(),
+                }
+            }
+            None => api::get_active_challenge_data(&context.client, &context.api_url)?,
+        };
+
+        println!("\n════════════════════════════════════════════════════════════");
+        println!("🎯 Mining Challenge: {}", challenge_params.challenge_id);
+        println!("════════════════════════════════════════════════════════════");
+
+        // Reset wallet index for new challenge
+        {
+            let mut idx = next_wallet_index.lock().unwrap();
+            *idx = 0;
+        }
+
+        // Spawn initial concurrent miners
+        let mut handles = vec![];
+        let actual_concurrent = std::cmp::min(concurrent_count, total_wallets);
+
+        for slot_id in 0..actual_concurrent {
+            let wallets_clone = Arc::clone(&wallets_arc);
+            let next_idx_clone = Arc::clone(&next_wallet_index);
+            let context_clone = MiningContext {
+                client: context.client.clone(),
+                api_url: context.api_url.clone(),
+                tc_response: crate::data_types::TandCResponse {
+                    version: context.tc_response.version.clone(),
+                    content: context.tc_response.content.clone(),
+                    message: context.tc_response.message.clone(),
+                },
+                donate_to_option: context.donate_to_option,
+                threads: context.threads,
+                cli_challenge: context.cli_challenge,
+                data_dir: Some(base_dir),
+            };
+            let challenge_clone = challenge_params.clone();
+
+            let handle = thread::spawn(move || {
+                loop {
+                    // Get next wallet to mine with
+                    let wallet_idx = {
+                        let mut idx = next_idx_clone.lock().unwrap();
+                        if *idx >= wallets_clone.len() {
+                            // No more wallets to process
+                            return;
+                        }
+                        let current = *idx;
+                        *idx += 1;
+                        current
+                    };
+
+                    let wallet = &wallets_clone[wallet_idx];
+                    println!("\n[Slot {}] Starting mining with Wallet #{} ({})", slot_id, wallet.id, wallet.name);
+
+                    // Derive key pair from mnemonic at index 0
+                    let key_pair = cardano::derive_key_pair_from_mnemonic(&wallet.mnemonic, 0, 0);
+                    let mining_address = key_pair.2.to_bech32().unwrap();
+
+                    println!("[Slot {}] Wallet #{} Address: {}", slot_id, wallet.id, mining_address);
+
+                    // Check if already solved for this challenge
+                    let data_dir = DataDir::Mnemonic(DataDirMnemonic {
+                        mnemonic: &wallet.mnemonic,
+                        account: 0,
+                        deriv_index: 0,
+                    });
+
+                    // Check for existing receipt
+                    let mut receipt_path = data_dir.receipt_dir(base_dir, &challenge_clone.challenge_id).unwrap();
+                    receipt_path.push(FILE_NAME_RECEIPT);
+
+                    if receipt_path.exists() {
+                        println!("[Slot {}] ✅ Wallet #{} already solved this challenge, moving to next wallet", slot_id, wallet.id);
+                        continue;
+                    }
+
+                    // Check if solution is pending in queue
+                    if is_solution_pending_in_queue(base_dir, &mining_address, &challenge_clone.challenge_id).unwrap_or(false) {
+                        println!("[Slot {}] ⏳ Wallet #{} has pending solution for this challenge, moving to next wallet", slot_id, wallet.id);
+                        continue;
+                    }
+
+                    // Register address
+                    let reg_message = context_clone.tc_response.message.clone();
+                    let reg_signature = cardano::cip8_sign(&key_pair, &reg_message);
+
+                    if let Err(e) = api::register_address(
+                        &context_clone.client,
+                        &context_clone.api_url,
+                        &mining_address,
+                        &reg_message,
+                        &reg_signature.0,
+                        &hex::encode(key_pair.1.as_ref())
+                    ) {
+                        eprintln!("[Slot {}] ⚠️ Wallet #{} registration failed: {}. Moving to next wallet.", slot_id, wallet.id, e);
+                        continue;
+                    }
+
+                    // Mine
+                    println!("[Slot {}] ⛏️  Wallet #{} starting mining...", slot_id, wallet.id);
+                    let (result, _total_hashes, _elapsed_secs) = run_single_mining_cycle(
+                        mining_address.clone(),
+                        context_clone.threads,
+                        context_clone.donate_to_option,
+                        &challenge_clone,
+                        Some(base_dir),
+                    );
+
+                    match result {
+                        MiningResult::FoundAndQueued => {
+                            println!("[Slot {}] 🎉 Wallet #{} found solution! Moving to next wallet.", slot_id, wallet.id);
+
+                            // Handle donation if configured
+                            if let Some(ref destination_address) = context_clone.donate_to_option {
+                                let donation_message = format!("Assign accumulated Scavenger rights to: {}", destination_address);
+                                let donation_signature = cardano::cip8_sign(&key_pair, &donation_message);
+
+                                match api::donate_to(
+                                    &context_clone.client,
+                                    &context_clone.api_url,
+                                    &mining_address,
+                                    destination_address,
+                                    &donation_signature.0,
+                                ) {
+                                    Ok(id) => println!("[Slot {}] 🚀 Wallet #{} donation successful. ID: {}", slot_id, wallet.id, id),
+                                    Err(e) => eprintln!("[Slot {}] ⚠️ Wallet #{} donation failed: {}", slot_id, wallet.id, e),
+                                }
+                            }
+                        }
+                        MiningResult::AlreadySolved => {
+                            println!("[Slot {}] ℹ️  Wallet #{} - Challenge already solved by someone else", slot_id, wallet.id);
+                        }
+                        MiningResult::MiningFailed => {
+                            eprintln!("[Slot {}] ❌ Wallet #{} mining failed", slot_id, wallet.id);
+                        }
+                    }
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all mining threads to complete
+        for handle in handles {
+            let _ = handle.join();
+        }
+
+        println!("\n✅ All wallets processed for challenge {}", challenge_params.challenge_id);
+
+        // If using CLI challenge (not polling), exit after one round
+        if context.cli_challenge.is_some() {
+            println!("CLI challenge mode: Exiting after processing all wallets.");
+            break;
+        }
+
+        // Otherwise, wait for next challenge
+        println!("⏳ Waiting for next challenge...");
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+
+    Ok(())
+}

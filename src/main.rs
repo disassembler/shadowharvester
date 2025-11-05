@@ -14,8 +14,8 @@ mod utils; // The helpers module
 mod mining;
 mod submitter;
 
-use mining::{run_persistent_key_mining, run_mnemonic_sequential_mining, run_ephemeral_key_mining};
-use utils::{setup_app, print_mining_setup}; // Importing refactored helpers
+use mining::{run_persistent_key_mining, run_mnemonic_sequential_mining, run_ephemeral_key_mining, run_concurrent_wallets_mining};
+use utils::{setup_app, print_mining_setup, load_wallets_from_file}; // Importing refactored helpers
 use cli::Cli;
 use api::get_active_challenge_data;
 
@@ -60,7 +60,19 @@ fn run_app(cli: Cli) -> Result<(), String> {
         None
     };
 
-    // 1. Default mode: display info and exit
+    // 1. Check for wallets file mode first (highest priority)
+    if let Some(wallets_file) = cli.wallets_file.as_ref() {
+        // Mode D: Concurrent Wallets Mining
+        let wallets = load_wallets_from_file(wallets_file)?;
+        let result = run_concurrent_wallets_mining(context, wallets, cli.concurrent_wallets);
+
+        // NOTE: In a production app, you would join the submitter thread here.
+        // if let Some(handle) = submitter_handle { handle.join().unwrap(); }
+
+        return result;
+    }
+
+    // 2. Default mode: display info and exit
     if cli.payment_key.is_none() && !cli.ephemeral_key && mnemonic.is_none() && cli.challenge.is_none() {
         // Fetch challenge for info display
         match get_active_challenge_data(&context.client, &context.api_url) {
@@ -74,11 +86,11 @@ fn run_app(cli: Cli) -> Result<(), String> {
             },
             Err(e) => eprintln!("Could not fetch active challenge for info display: {}", e),
         };
-        println!("MODE: INFO ONLY. Provide '--payment-key', '--mnemonic', '--mnemonic-file', or '--ephemeral-key' to begin mining.");
+        println!("MODE: INFO ONLY. Provide '--payment-key', '--mnemonic', '--mnemonic-file', '--wallets-file', or '--ephemeral-key' to begin mining.");
         return Ok(())
     }
 
-    // 2. Determine Operation Mode and Start Mining
+    // 3. Determine Operation Mode and Start Mining
     let result = if let Some(skey_hex) = cli.payment_key.as_ref() {
         // Mode A: Persistent Key Mining
         run_persistent_key_mining(context, skey_hex)

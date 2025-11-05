@@ -377,6 +377,19 @@ pub fn setup_app(cli: &crate::cli::Cli) -> Result<MiningContext<'_>, String> {
         return Err("Cannot use both '--mnemonic' and '--mnemonic-file' flags simultaneously.".to_string());
     }
 
+    // Wallets file conflicts with other key modes
+    if cli.wallets_file.is_some() {
+        if cli.payment_key.is_some() {
+            return Err("Cannot use '--wallets-file' with '--payment-key' simultaneously.".to_string());
+        }
+        if cli.mnemonic.is_some() || cli.mnemonic_file.is_some() {
+            return Err("Cannot use '--wallets-file' with '--mnemonic' or '--mnemonic-file' simultaneously.".to_string());
+        }
+        if cli.ephemeral_key {
+            return Err("Cannot use '--wallets-file' with '--ephemeral-key' simultaneously.".to_string());
+        }
+    }
+
     // Ephemeral key conflicts with payment key and mnemonic
     if cli.ephemeral_key {
         if cli.payment_key.is_some() {
@@ -428,4 +441,20 @@ pub fn setup_app(cli: &crate::cli::Cli) -> Result<MiningContext<'_>, String> {
         cli_challenge: cli.challenge.as_ref(),
         data_dir: cli.data_dir.as_deref(),
     })
+}
+
+/// Loads wallets from a JSON file
+pub fn load_wallets_from_file(file_path: &str) -> Result<Vec<crate::data_types::WalletEntry>, String> {
+    let file_content = std::fs::read_to_string(file_path)
+        .map_err(|e| format!("Failed to read wallets file '{}': {}", file_path, e))?;
+
+    let wallets: Vec<crate::data_types::WalletEntry> = serde_json::from_str(&file_content)
+        .map_err(|e| format!("Failed to parse wallets JSON: {}", e))?;
+
+    if wallets.is_empty() {
+        return Err("Wallets file is empty".to_string());
+    }
+
+    println!("✅ Loaded {} wallet(s) from {}", wallets.len(), file_path);
+    Ok(wallets)
 }
