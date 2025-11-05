@@ -111,6 +111,19 @@ pub fn run_persistent_key_mining(context: MiningContext, skey_hex: &String) -> R
 
             match result {
                 MiningResult::FoundAndQueued => {
+                    if let Some(ref destination_address) = context.donate_to_option {
+                        let donation_message = format!("Assign accumulated Scavenger rights to: {}", destination_address);
+                        let donation_signature = cardano::cip8_sign(&key_pair, &donation_message);
+
+                        // Intentionally perform donation attempt synchronously here.
+                        match api::donate_to(
+                            &context.client, &context.api_url, &mining_address, destination_address, &donation_signature.0,
+                        ) {
+                            Ok(id) => println!("🚀 Donation initiated successfully. ID: {}", id),
+                            Err(e) => eprintln!("⚠️ Donation failed (synchronous attempt): {}", e),
+                        }
+                    }
+
                     println!("\n✅ Solution queued. Continuing mining immediately.");
                     // Continue the loop on the same address.
                 },
@@ -286,6 +299,20 @@ pub fn run_mnemonic_sequential_mining(cli: &Cli, context: MiningContext, mnemoni
         // --- 4. Post-Mining Index Advancement ---
         match result {
             MiningResult::FoundAndQueued => {
+                if let Some(ref destination_address) = context.donate_to_option {
+                    // key_pair is available locally in this loop scope
+                    let donation_message = format!("Assign accumulated Scavenger rights to: {}", destination_address);
+                    let donation_signature = cardano::cip8_sign(&key_pair, &donation_message);
+
+                    // Attempt donation synchronously. Ignore result here to keep the main flow clean.
+                    match api::donate_to(
+                        &context.client, &context.api_url, &mining_address, destination_address, &donation_signature.0,
+                    ) {
+                        Ok(id) => println!("🚀 Donation initiated successfully. ID: {}", id),
+                        Err(e) => eprintln!("⚠️ Donation failed (synchronous attempt): {}", e),
+                    }
+                }
+
                 wallet_deriv_index = wallet_deriv_index.wrapping_add(1);
                 println!("\n✅ Solution queued. Incrementing index to {}.", wallet_deriv_index);
             },
@@ -362,6 +389,19 @@ pub fn run_ephemeral_key_mining(context: MiningContext) -> Result<(), String> {
 
         match result {
             MiningResult::FoundAndQueued => {
+                if let Some(ref destination_address) = context.donate_to_option {
+                    // key_pair is available locally in this loop scope
+                    let donation_message = format!("Assign accumulated Scavenger rights to: {}", destination_address);
+                    let donation_signature = cardano::cip8_sign(&key_pair, &donation_message);
+
+                    // Attempt donation synchronously. Ignore result here to keep the main thread fast.
+                    match api::donate_to(
+                        &context.client, &context.api_url, &generated_mining_address, destination_address, &donation_signature.0,
+                    ) {
+                        Ok(id) => println!("🚀 Donation initiated successfully. ID: {}", id),
+                        Err(e) => eprintln!("⚠️ Donation failed (synchronous attempt): {}", e),
+                    }
+                }
                 eprintln!("Solution queued. Starting next cycle immediately...");
             }
             MiningResult::AlreadySolved => { eprintln!("Solution was already accepted by the network. Starting next cycle immediately..."); }
