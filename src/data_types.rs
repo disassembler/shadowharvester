@@ -163,8 +163,6 @@ pub enum MiningResult {
 // --- DataDir Structures and Constants ---
 pub const FILE_NAME_CHALLENGE: &str = "challenge.json";
 pub const FILE_NAME_RECEIPT: &str = "receipt.json";
-pub const FILE_NAME_DONATION: &str = "donation.txt";
-// Removed: FILE_NAME_PENDING_SOLUTION is unused, path is derived from QUEUE_BASE_DIR
 pub const FILE_NAME_FOUND_SOLUTION: &str = "found.json"; // (Crash recovery file)
 
 

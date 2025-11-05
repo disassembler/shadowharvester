@@ -31,7 +31,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
 
     // --- Start Background Submitter Thread ---
     // Clone client, API URL, and data_dir for the background thread
-    let submitter_handle = if let Some(base_dir) = context.data_dir {
+    let _submitter_handle = if let Some(base_dir) = context.data_dir {
         let client_clone = context.client.clone();
         let api_url_clone = context.api_url.clone();
         let data_dir_clone = base_dir.to_string();

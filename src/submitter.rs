@@ -1,8 +1,7 @@
 // src/submitter.rs
 
-use crate::data_types::{PendingSolution, DataDir, ChallengeData};
+use crate::data_types::{PendingSolution, DataDir};
 use crate::api;
-use crate::cardano::{self};
 use crate::backoff::Backoff;
 use reqwest::blocking::Client;
 use std::path::{Path, PathBuf};
@@ -30,7 +29,7 @@ pub fn run_submitter_thread(client: Client, api_url: String, data_dir_base: Stri
             Ok(entries) => {
                 for entry in entries.filter_map(|e| e.ok()) {
                     let path = entry.path();
-                    if path.is_file() && path.extension().map_or(false, |ext| ext == "json") {
+                    if path.is_file() && path.extension().is_some_and(|ext| ext == "json") {
                         // Attempt to process the file, break on success to immediately check the next one
                         if process_pending_solution(&client, &api_url, &path, &data_dir_base).is_ok() {
                             processed_submission = true;

@@ -1,7 +1,6 @@
 // src/utils.rs
 
 use crate::api;
-use crate::cardano;
 use crate::constants::USER_AGENT;
 use crate::data_types::{
     DataDir, DataDirMnemonic, MiningContext, MiningResult, FILE_NAME_RECEIPT,

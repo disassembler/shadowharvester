@@ -5,7 +5,7 @@ use crate::data_types::{DataDir, DataDirMnemonic, MiningContext, MiningResult, C
 use crate::cli::Cli;
 use crate::cardano;
 use crate::utils::{self, next_wallet_deriv_index_for_challenge, print_mining_setup, print_statistics, receipt_exists_for_index, run_single_mining_cycle};
-use std::{fs, path::PathBuf}; // Added fs, path::PathBuf
+use std::{fs};
 
 // ===============================================
 // SOLUTION RECOVERY FUNCTION
@@ -272,7 +272,6 @@ pub fn run_mnemonic_sequential_mining(cli: &Cli, context: MiningContext, mnemoni
         // --- 3. Key Generation, Registration, and Mining ---
         let key_pair = cardano::derive_key_pair_from_mnemonic(&mnemonic_phrase, cli.mnemonic_account, wallet_deriv_index);
         let mining_address = key_pair.2.to_bech32().unwrap();
-        let data_dir = DataDir::Mnemonic(DataDirMnemonic { mnemonic: &mnemonic_phrase, account: cli.mnemonic_account, deriv_index: wallet_deriv_index });
 
         println!("\n[CYCLE START] Deriving Address Index {}: {}", wallet_deriv_index, mining_address);
         if match max_registered_index { Some(idx) => wallet_deriv_index > idx, None => true } {
