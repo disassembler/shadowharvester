@@ -80,10 +80,20 @@ fn process_pending_solution(client: &Client, api_url: &str, file_path: &Path, da
                 continue;
             },
             Err(e) => {
-                // Non-recoverable API Error (Validation, Already Solved, Challenge Expired, etc.)
-                eprintln!("❌ Non-recoverable API Submission Error. Deleting from queue. Details: {}", e);
-                non_recoverable_error = true;
-                break;
+                // Determine if this is a recoverable 5xx error or a non-recoverable 4xx validation error.
+                // We check for 50x or 51x (to be safe) status codes, which indicate server-side failure.
+                let is_5xx_server_error = e.contains("(Status 50") || e.contains("(Status 51");
+
+                if is_5xx_server_error {
+                    eprintln!("⚠️ Solution submission failed (Server Error, possibly transient): {}. Retrying with backoff...", e);
+                    backoff.sleep();
+                    continue;
+                } else {
+                    // Treat 4xx errors (API Validation, Already Solved, Challenge Expired, etc.) as non-recoverable.
+                    eprintln!("❌ Non-recoverable API Submission Error. Deleting from queue. Details: {}", e);
+                    non_recoverable_error = true;
+                    break;
+                }
             }
         }
     }
