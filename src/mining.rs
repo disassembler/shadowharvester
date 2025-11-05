@@ -5,7 +5,7 @@ use crate::data_types::{DataDir, DataDirMnemonic, MiningContext, MiningResult, C
 use crate::cli::Cli;
 use crate::cardano;
 use crate::utils::{self, next_wallet_deriv_index_for_challenge, print_mining_setup, print_statistics, receipt_exists_for_index, run_single_mining_cycle};
-use std::{fs};
+use std::{fs, path::PathBuf}; // Added fs, path::PathBuf
 
 // ===============================================
 // SOLUTION RECOVERY FUNCTION
@@ -124,8 +124,8 @@ pub fn run_persistent_key_mining(context: MiningContext, skey_hex: &String) -> R
                         }
                     }
 
-                    println!("\n✅ Solution queued. Continuing mining immediately.");
-                    // Continue the loop on the same address.
+                    println!("\n✅ Solution queued. Checking for new challenge/expiration.");
+                    break; // Break the inner loop to re-poll the challenge API.
                 },
                 MiningResult::AlreadySolved => {
                     println!("\n✅ Challenge already solved on network. Stopping current mining.");
