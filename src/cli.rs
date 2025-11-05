@@ -21,7 +21,7 @@ pub struct Cli {
     pub address: Option<String>,
 
     /// Number of worker threads to use for mining.
-    #[arg(long, default_value_t = 24)]
+    #[arg(long, default_value_t = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(24))]
     pub threads: u32,
 
     /// Optional secret key (hex-encoded) to mine with.
