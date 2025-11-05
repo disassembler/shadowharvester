@@ -180,10 +180,22 @@ pub struct DataDirMnemonic<'a> {
     pub deriv_index: u32,
 }
 
+fn normalize_challenge_id(challenge_id: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        // Directories with '*' are not supported on windows
+        challenge_id.replace("*", "")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        challenge_id.to_string()
+    }
+}
+
 impl<'a> DataDir<'a> {
     pub fn challenge_dir(&'a self, base_dir: &str, challenge_id: &str) -> Result<PathBuf, String> {
         let mut path = PathBuf::from(base_dir);
-        path.push(challenge_id);
+        path.push(normalize_challenge_id(challenge_id));
         Ok(path)
     }
 
@@ -263,7 +275,7 @@ impl<'a> DataDir<'a> {
             .map_err(|e| format!("Could not create pending_submissions directory: {}", e))?;
 
         // Use a unique file name based on challenge, address, and nonce
-        path.push(format!("{}_{}_{}.json", solution.address, solution.challenge_id, solution.nonce));
+        path.push(format!("{}_{}_{}.json", solution.address, normalize_challenge_id(&solution.challenge_id), solution.nonce));
 
         let solution_json = serde_json::to_string(solution)
             .map_err(|e| format!("Could not serialize pending solution: {}", e))?;
@@ -320,7 +332,7 @@ pub fn is_solution_pending_in_queue(base_dir: &str, address: &str, challenge_id:
             if let Some(filename) = entry.file_name().to_str() {
                 // Check if the filename starts with the required prefix and is a JSON file
                 // The filename format is: address_challenge_id_nonce.json
-                if filename.starts_with(&format!("{}_{}_", address, challenge_id)) && filename.ends_with(".json") {
+                if filename.starts_with(&format!("{}_{}_", address, normalize_challenge_id(&challenge_id))) && filename.ends_with(".json") {
                     return Ok(true);
                 }
             }
