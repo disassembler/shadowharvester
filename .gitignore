@@ -5,4 +5,4 @@ result*
 *.vkey
 *.mnemonic
 challenges.json
-state*
+/state*

@@ -220,6 +220,9 @@ pub fn run_single_mining_cycle(
                 challenge_id: challenge_params.challenge_id.clone(),
                 nonce: nonce.clone(),
                 donation_address: donate_to_option.cloned(),
+                // FIX: Add placeholder values for the new fields (synchronous function cannot capture full context)
+                preimage: "Legacy_Preimage_Not_Captured_Sync_Mode".to_string(),
+                hash_output: "Legacy_Hash_Not_Captured_Sync_Mode".to_string(),
             };
 
 
@@ -363,7 +366,7 @@ pub fn next_wallet_deriv_index_for_challenge(
 
 /// Handles the initial setup, argument validation, T&C, and pre-mining command dispatch.
 /// Returns the necessary context for the main mining loop functions.
-pub fn setup_app(cli: &crate::cli::Cli) -> Result<MiningContext<'_>, String> {
+pub fn setup_app(cli: &crate::cli::Cli) -> Result<MiningContext, String> {
     // 1. Check for --api-url
     let api_url: String = match cli.api_url.clone() {
         Some(url) => url,
@@ -423,9 +426,9 @@ pub fn setup_app(cli: &crate::cli::Cli) -> Result<MiningContext<'_>, String> {
         client,
         api_url,
         tc_response,
-        donate_to_option: cli.donate_to.as_ref(),
+        donate_to_option: cli.donate_to.clone(),
         threads: cli.threads,
-        cli_challenge: cli.challenge.as_ref(),
-        data_dir: cli.data_dir.as_deref(),
+        cli_challenge: cli.challenge.clone(),
+        data_dir: cli.data_dir.clone(),
     })
 }

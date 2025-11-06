@@ -49,18 +49,119 @@ pub struct Cli {
     #[arg(long, default_value_t = 0)]
     pub mnemonic_starting_index: u32,
 
+    /// The name of the challenge to mine (e.g., D07C21). The challenge details are loaded from the Sled DB.
     #[arg(long)]
     pub challenge: Option<String>,
 
     /// Where to store state (like the mnemonic starting index) and receipts
     #[arg(long, default_value = ".")]
     pub data_dir: Option<String>,
+
+    /// Enable WebSocket mode for receiving challenges and posting solutions.
+    #[arg(long)]
+    pub websocket: bool,
 }
 
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
-    /// Lists the current status and details of the mining challenge.
+    /// Lists the current status and details of the mining challenge (API-based check).
     #[command(author, about = "List current challenge status")]
     Challenges,
+
+    /// Migrates old file-based state (receipts/indices) to the new Sled database.
+    #[command(author, about = "Migrate old file-based state to Sled DB")]
+    MigrateState {
+        /// The path to the old file-based state directory (default: current directory).
+        #[arg(long, default_value = ".")]
+        old_data_dir: String,
+    },
+
+    /// Commands for managing stored challenges (list, import, info).
+    #[command(subcommand, author, about = "Manage local challenge state (list, import, info)")]
+    Challenge(ChallengeCommands),
+
+    /// Commands for inspecting known wallet addresses and derivations.
+    #[command(subcommand, author, about = "Inspect known wallet addresses")]
+    Wallet(WalletCommands),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ChallengeCommands {
+    /// Lists all challenge IDs stored in the local Sled database.
+    List,
+
+    /// Imports a challenge JSON file into the local Sled database for offline/custom mining.
+    Import {
+        /// Path to the challenge JSON file (must contain ChallengeData structure).
+        #[arg(long)]
+        file: String,
+    },
+
+    /// Dumps the full JSON details of a specific challenge loaded from the Sled DB.
+    Info {
+        /// The ID of the challenge to display (e.g., D07C21).
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Outputs challenge details, plus local completed and pending solution counts.
+    #[command(author, about = "Outputs detailed challenge stats and mining setup.")]
+    Details {
+        /// The ID of the challenge to display (e.g., D07C21).
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Dumps the receipt JSON for a specific address and challenge ID.
+    ReceiptInfo {
+        /// The ID of the challenge (e.g., D07C21).
+        #[arg(long)]
+        challenge_id: String,
+        /// The Cardano address associated with the receipt.
+        #[arg(long)]
+        address: String,
+    },
+
+    /// Dumps the JSON details of a specific pending solution.
+    PendingInfo {
+        /// The ID of the challenge (e.g., D07C21).
+        #[arg(long)]
+        challenge_id: String,
+        /// The Cardano address associated with the pending solution.
+        #[arg(long)]
+        address: String,
+        /// The nonce of the solution (16 hex chars).
+        #[arg(long)]
+        nonce: String,
+    },
+    Errors,
+    Hash {
+        /// The ID of the challenge (e.g., D07C21).
+        #[arg(long)]
+        challenge_id: String,
+        /// The Cardano address associated with the receipt.
+        #[arg(long)]
+        address: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum WalletCommands {
+    /// Lists unique wallet identifiers (Mnemonic Hash:Account Index) found in the database.
+    List,
+
+    /// Lists all known addresses and derivation paths (<index>:<address>) for a specific wallet hash.
+    Addresses {
+        /// The unique wallet identifier (Mnemonic Hash:Account Index) to inspect (e.g., 16886378742194182050:0).
+        #[arg(long)]
+        wallet: String,
+    },
+
+    /// Lists all challenge IDs that a specific address has a receipt for.
+    ListChallenges {
+        /// The Cardano address to inspect.
+        #[arg(long)]
+        address: String,
+    },
 }
