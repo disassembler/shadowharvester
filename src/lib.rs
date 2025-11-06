@@ -411,14 +411,8 @@ pub fn hash(salt: &[u8], rom: &Rom, nb_loops: u32, nb_instrs: u32) -> [u8; 64] {
 }
 
 pub fn hash_structure_good(hash: &[u8], difficulty_mask: u32) -> bool {
-    let u32_ptr = hash.as_ptr() as *const u32;
-    unsafe {
-        let value = u32_ptr.read_unaligned().to_be();
-        if (value | difficulty_mask) == difficulty_mask {
-            return true
-        }
-    }
-    false
+    let value = u32::from_be_bytes(hash[..4].try_into().unwrap());
+    (value | difficulty_mask) == difficulty_mask
 }
 
 // --------------------------------------------------------------------------
@@ -468,11 +462,8 @@ pub fn build_preimage(
 }
 
 fn update_preimage_nonce(preimage_string: &mut String, nonce: u64) {
-    let bytes = unsafe {
-        preimage_string.as_bytes_mut()
-    };
     let nonce_str = format!("{:016x}", nonce);
-    bytes[..16].copy_from_slice(nonce_str.as_bytes());
+    preimage_string.replace_range(0..16, &nonce_str);
 }
 
 // The worker thread function
