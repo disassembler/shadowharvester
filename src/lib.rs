@@ -410,27 +410,10 @@ pub fn hash(salt: &[u8], rom: &Rom, nb_loops: u32, nb_instrs: u32) -> [u8; 64] {
     vm.finalize()
 }
 
-pub fn hash_structure_good(hash: &[u8], zero_bits: usize) -> bool {
-    let full_bytes = zero_bits / 8; // Number of full zero bytes
-    let remaining_bits = zero_bits % 8; // Bits to check in the next byte
-
-    // Check full zero bytes
-    if hash.len() < full_bytes || hash[..full_bytes].iter().any(|&b| b != 0) {
-        return false;
-    }
-
-    if remaining_bits == 0 {
-        return true;
-    }
-    if hash.len() > full_bytes {
-        // Mask for the most significant bits
-        let mask = 0xFF << (8 - remaining_bits);
-        hash[full_bytes] & mask == 0
-    } else {
-        false
-    }
+pub fn hash_structure_good(hash: &[u8], difficulty_mask: u32) -> bool {
+    let value = u32::from_be_bytes(hash[..4].try_into().unwrap());
+    (value | difficulty_mask) == difficulty_mask
 }
-
 
 // --------------------------------------------------------------------------
 // SCAVENGE LOGIC
@@ -442,12 +425,11 @@ pub struct Thread {}
 #[derive(Clone)]
 pub struct ChallengeParams {
     pub rom_key: String, // no_pre_mine hex string (used for ROM init)
-    pub difficulty_mask: String, // difficulty hex string (used for submission check)
+    pub difficulty_mask: u32, // difficulty mask (used for submission check)
     pub address: String, // Registered Cardano address
     pub challenge_id: String,
     pub latest_submission: String,
     pub no_pre_mine_hour: String,
-    pub required_zero_bits: usize, // Derived from difficulty_mask
     pub rom: Arc<Rom>,
 }
 
@@ -462,7 +444,7 @@ pub fn build_preimage(
     nonce: u64,
     address: &str,
     challenge_id: &str,
-    difficulty: &str,
+    difficulty_mask: u32,
     no_pre_mine: &str,
     latest_submission: &str,
     no_pre_mine_hour: &str,
@@ -472,26 +454,16 @@ pub fn build_preimage(
     preimage.push_str(&nonce_hex);
     preimage.push_str(address);
     preimage.push_str(challenge_id);
-    preimage.push_str(difficulty);
+    preimage.push_str(&format!("{:08X}", difficulty_mask));
     preimage.push_str(no_pre_mine);
     preimage.push_str(latest_submission);
     preimage.push_str(no_pre_mine_hour);
     preimage
 }
 
-// Utility function to convert difficulty mask (e.g., "000FFFFF") to number of required zero bits
-fn difficulty_to_zero_bits(difficulty_hex: &str) -> usize {
-    let difficulty_bytes = hex::decode(difficulty_hex).unwrap();
-    let mut zero_bits = 0;
-    for &byte in difficulty_bytes.iter() {
-        if byte == 0x00 {
-            zero_bits += 8;
-        } else {
-            zero_bits += byte.leading_zeros() as usize;
-            break;
-        }
-    }
-    zero_bits
+fn update_preimage_nonce(preimage_string: &mut String, nonce: u64) {
+    let nonce_str = format!("{:016x}", nonce);
+    preimage_string.replace_range(0..16, &nonce_str);
 }
 
 // The worker thread function
@@ -501,22 +473,21 @@ fn spin(params: ChallengeParams, sender: Sender<Result>, stop_signal: Arc<Atomic
     const NB_LOOPS: u32 = 8;
     const NB_INSTRS: u32 = 256;
 
-    let my_address = &params.address;
+    let mut preimage_string = build_preimage(
+        nonce_value,
+        &params.address,
+        &params.challenge_id,
+        params.difficulty_mask,
+        &params.rom_key,
+        &params.latest_submission,
+        &params.no_pre_mine_hour,
+    );
 
     while !stop_signal.load(Ordering::Relaxed) {
-        let preimage_string = build_preimage(
-            nonce_value,
-            my_address,
-            &params.challenge_id,
-            &params.difficulty_mask,
-            &params.rom_key,
-            &params.latest_submission,
-            &params.no_pre_mine_hour,
-        );
         let preimage_bytes = preimage_string.as_bytes();
         let h = hash(preimage_bytes, &params.rom, NB_LOOPS, NB_INSTRS);
 
-        if hash_structure_good(&h, params.required_zero_bits) {
+        if hash_structure_good(&h, params.difficulty_mask) {
             if sender.send(Result::Found(nonce_value)).is_ok() {
                 // Sent the found nonce
             }
@@ -529,6 +500,7 @@ fn spin(params: ChallengeParams, sender: Sender<Result>, stop_signal: Arc<Atomic
 
         // Increment nonce by the thread step size
         nonce_value = nonce_value.wrapping_add(step_size);
+        update_preimage_nonce(&mut preimage_string, nonce_value);
     }
 }
 
@@ -545,9 +517,7 @@ pub fn scavenge(
     const MB: usize = 1024 * 1024;
     const GB: usize = 1024 * MB;
 
-    let required_zero_bits = difficulty_to_zero_bits(&difficulty);
-
-    // We rely on the caller to print required_zero_bits
+    let difficulty_mask = u32::from_str_radix(&difficulty, 16).unwrap();
 
     let nb_threads_u64 = nb_threads as u64;
     let step_size = nb_threads_u64;
@@ -570,12 +540,11 @@ pub fn scavenge(
 
         let common_params = ChallengeParams {
             rom_key: no_pre_mine_key.clone(),
-            difficulty_mask: difficulty.clone(),
+            difficulty_mask,
             address: my_registered_address.clone(),
             challenge_id: challenge_id.clone(),
             latest_submission: latest_submission.clone(),
             no_pre_mine_hour: no_pre_mine_hour.clone(),
-            required_zero_bits,
             rom: Arc::new(rom),
         };
 
