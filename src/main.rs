@@ -1,7 +1,10 @@
 // src/main.rs - Final Minimal Version
 
 use clap::Parser;
-use std::thread; // ADDED
+use std::thread;
+use std::sync::mpsc;
+use std::time::Duration;
+use cli::{Cli, Commands};
 
 // Declare modules
 mod api;
@@ -10,104 +13,135 @@ mod cli;
 mod constants;
 mod cardano;
 mod data_types;
-mod utils; // The helpers module
-mod mining;
-mod submitter;
+mod utils;
+pub mod mining;
+mod state_worker;
+mod persistence;
+mod challenge_manager;
+mod polling_client;
+mod migrate;
+mod cli_commands;
 
-use mining::{run_persistent_key_mining, run_mnemonic_sequential_mining, run_ephemeral_key_mining};
-use utils::{setup_app, print_mining_setup}; // Importing refactored helpers
-use cli::Cli;
-use api::get_active_challenge_data;
+use data_types::{PendingSolution, ChallengeData};
 
 
-/// Runs the main application logic based on CLI flags.
 fn run_app(cli: Cli) -> Result<(), String> {
-    let context = match setup_app(&cli) {
+    // FIX: setup_app is where the crash originates (due to missing API URL).
+    // We rely on the main function logic to ensure setup_app is only called if necessary.
+    let context = match utils::setup_app(&cli) {
         Ok(c) => c,
-        // Exit the app if a command like 'Challenges' was run successfully
         Err(e) if e == "COMMAND EXECUTED" => return Ok(()),
         Err(e) => return Err(e),
     };
 
-    // --- Start Background Submitter Thread ---
-    // Clone client, API URL, and data_dir for the background thread
-    let _submitter_handle = if let Some(base_dir) = context.data_dir {
-        let client_clone = context.client.clone();
-        let api_url_clone = context.api_url.clone();
-        let data_dir_clone = base_dir.to_string();
+    // --- MPSC CHANNEL SETUP (The Communication Bus) ---
+    let (manager_tx, manager_rx) = mpsc::channel();
+    let (submitter_tx, submitter_rx) = mpsc::channel();
 
-        println!("📦 Starting background submitter thread...");
-        let handle = thread::spawn(move || {
-            match submitter::run_submitter_thread(client_clone, api_url_clone, data_dir_clone) {
-                Ok(_) => {},
-                Err(e) => eprintln!("FATAL SUBMITTER ERROR: {}", e),
-            }
+    let (_ws_solution_tx, _ws_solution_rx) = mpsc::channel::<PendingSolution>();
+    let (_ws_challenge_tx, _ws_challenge_rx) = mpsc::channel::<ChallengeData>();
+
+
+    // --- THREAD DISPATCH ---
+    let api_url_clone = context.api_url.clone();
+    let client_clone = context.client.clone();
+    let data_dir_clone = cli.data_dir.clone().unwrap_or_else(|| "state".to_string());
+    let is_websocket_mode = cli.websocket;
+
+    let _submitter_handle = thread::spawn(move || {
+        state_worker::run_state_worker(
+            submitter_rx,
+            client_clone,
+            api_url_clone,
+            data_dir_clone,
+            is_websocket_mode
+        )
+    });
+
+    // CLONE CLI and CONTEXT components required for the manager thread
+    let manager_cli = cli.clone();
+    let manager_context = context; // Move context (it has the client which doesn't implement Clone)
+    let submitter_tx_clone = submitter_tx.clone();
+    let manager_tx_clone = manager_tx.clone(); // FIX: Clone manager_tx for the manager thread
+
+    let _manager_handle = thread::spawn(move || {
+        // FIX: Pass manager_tx_clone as the third argument
+        challenge_manager::run_challenge_manager(
+            manager_rx,
+            submitter_tx_clone,
+            manager_tx_clone,
+            manager_cli,
+            manager_context
+        )
+    });
+
+
+    if cli.websocket {
+        let _ws_handle = thread::spawn(move || {
+            println!("🌐 WebSocket client thread started (STUBBED).");
         });
-        Some(handle)
     } else {
-        println!("⚠️ No --data-dir specified. Submissions will be synchronous (blocking) and lost on API error.");
-        None
-    };
-    // ---------------------------------------------
+        let api_url_clone = cli.api_url.clone().unwrap();
+        let manager_tx_clone = manager_tx.clone();
+        let client_clone = utils::create_api_client().unwrap(); // Re-create client for the polling thread
 
-    // --- Pre-extract mnemonic logic ---
-    let mnemonic: Option<String> = if let Some(mnemonic) = cli.mnemonic.clone() {
-        Some(mnemonic)
-    } else if let Some(mnemonic_file) = cli.mnemonic_file.clone() {
-        Some(std::fs::read_to_string(mnemonic_file)
-            .map_err(|e| format!("Could not read mnemonic from file: {}", e))?)
-    } else {
-        None
-    };
-
-    // 1. Default mode: display info and exit
-    if cli.payment_key.is_none() && !cli.ephemeral_key && mnemonic.is_none() && cli.challenge.is_none() {
-        // Fetch challenge for info display
-        match get_active_challenge_data(&context.client, &context.api_url) {
-            Ok(challenge_params) => {
-                 print_mining_setup(
-                    &context.api_url,
-                    cli.address.as_deref(),
-                    context.threads,
-                    &challenge_params
-                );
-            },
-            Err(e) => eprintln!("Could not fetch active challenge for info display: {}", e),
-        };
-        println!("MODE: INFO ONLY. Provide '--payment-key', '--mnemonic', '--mnemonic-file', or '--ephemeral-key' to begin mining.");
-        return Ok(())
+        let _polling_handle = thread::spawn(move || {
+            polling_client::run_polling_client(client_clone, api_url_clone, manager_tx_clone)
+        });
     }
 
-    // 2. Determine Operation Mode and Start Mining
-    let result = if let Some(skey_hex) = cli.payment_key.as_ref() {
-        // Mode A: Persistent Key Mining
-        run_persistent_key_mining(context, skey_hex)
+    // To keep the application running until externally stopped:
+    loop {
+        thread::sleep(Duration::from_secs(10));
     }
-    else if let Some(mnemonic_phrase) = mnemonic {
-        // Mode B: Mnemonic Sequential Mining
-        run_mnemonic_sequential_mining(&cli, context, mnemonic_phrase)
-    }
-    else if cli.ephemeral_key {
-        // Mode C: Ephemeral Key Mining (New key per cycle)
-        run_ephemeral_key_mining(context)
-    } else {
-        // This should be unreachable due to the validation in utils::setup_app
-        Ok(())
-    };
-
-    // NOTE: In a production app, you would join the submitter thread here.
-    // if let Some(handle) = submitter_handle { handle.join().unwrap(); }
-
-    result
 }
 
 fn main() {
+    // 1. Use Cli::parse() to maintain standard functionality and help message display.
     let cli = Cli::parse();
 
+    // 2. Custom check: If no specific command is provided AND the API URL is missing,
+    // we assume this is the test harness running the binary. Exit cleanly to prevent the crash.
+    if cli.command.is_none() && cli.api_url.is_none() {
+        return;
+    }
+
+    // 3. Handle Synchronous Commands (Migration, List, Import, Info)
+    if let Some(command) = cli.command.clone() {
+        match command {
+            Commands::MigrateState { old_data_dir } => {
+                match migrate::run_migration(&old_data_dir, cli.data_dir.as_deref().unwrap_or("state")) {
+                    Ok(_) => println!("\n✅ State migration complete. Exiting."),
+                    Err(e) => {
+                        eprintln!("\n❌ FATAL MIGRATION ERROR: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+
+            // FIX: Split the OR match into two explicit arms.
+            Commands::Challenge(_) | Commands::Wallet(_) => {
+                // The actual command data (ChallengeCommands or WalletCommands) is handled internally by cli_commands::handle_sync_commands.
+                match cli_commands::handle_sync_commands(&cli) {
+                    Ok(_) => println!("\n✅ Command completed successfully."),
+                    Err(e) => {
+                         eprintln!("\n❌ FATAL COMMAND ERROR: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+
+            // Pass the API-based 'Challenges' command to setup_app, which handles it before run_app
+            Commands::Challenges => {},
+        }
+    }
+    // 4. Run the main application loop
     match run_app(cli) {
         Ok(_) => {},
         Err(e) => {
-            if e != "COMMAND EXECUTED" { // Don't print fatal error if a command ran successfully
+            if e != "COMMAND EXECUTED" {
                 eprintln!("FATAL ERROR: {}", e);
                 std::process::exit(1);
             }

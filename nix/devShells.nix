@@ -1,8 +1,9 @@
 {
-  perSystem = { pkgs, ... }: {
+  perSystem = { config, pkgs, ... }: {
     devShells.default = with pkgs; mkShell {
       packages = [
         cargo
+        cmake
         rustc
         pkg-config
         openssl
@@ -10,6 +11,7 @@
         rust-analyzer
         rustfmt
         clippy
+        config.packages.sledtool
       ];
     };
   };

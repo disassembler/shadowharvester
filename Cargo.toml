@@ -1,9 +1,9 @@
 [package]
 name = "shadow-harvester"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT Or Apache-2.0"
-repository = "https://github.com/input-output-hk/ce-ashmaize"
+repository = "https://github.com/disassembler/shadowharvester"
 
 # --- LIBRARY TARGET CONFIGURATION ---
 [lib]
@@ -11,6 +11,7 @@ repository = "https://github.com/input-output-hk/ce-ashmaize"
 name = "shadow_harvester_lib"
 # The path to your library code
 path = "src/lib.rs"
+test = true
 
 # --- BINARY TARGET CONFIGURATION ---
 [[bin]]
@@ -44,6 +45,9 @@ minicbor = { version = "0.25.1", features = ["derive"] }
 bip39 = { version = "2.2.0", features = ["alloc"] }
 ed25519-bip32 = "0.4.1"
 chrono = "0.4.42"
+mpsc = "0.2.6"
+sled = "0.34.7"
+num-integer = "0.1.46"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

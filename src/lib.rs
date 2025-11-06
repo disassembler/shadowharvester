@@ -1,5 +1,6 @@
 pub mod rom;
 pub mod cardano;
+pub mod persistence;
 pub use rom::{RomGenerationType, Rom, RomDigest};
 
 use cryptoxide::{
@@ -436,7 +437,7 @@ pub struct ChallengeParams {
 #[derive(Clone)]
 pub enum Result {
     Progress(usize),
-    Found(u64), // We search for the 64-bit nonce value
+    Found(u64, [u8; 64]), // Found now returns the nonce AND the 64-byte hash
 }
 
 // Helper to build the preimage string as specified in the API documentation
@@ -467,7 +468,7 @@ fn update_preimage_nonce(preimage_string: &mut String, nonce: u64) {
 }
 
 // The worker thread function
-fn spin(params: ChallengeParams, sender: Sender<Result>, stop_signal: Arc<AtomicBool>, start_nonce: u64, step_size: u64) {
+pub fn spin(params: ChallengeParams, sender: Sender<Result>, stop_signal: Arc<AtomicBool>, start_nonce: u64, step_size: u64) {
     let mut nonce_value = start_nonce;
     const CHUNKS_SIZE: usize = 0xff;
     const NB_LOOPS: u32 = 8;
@@ -488,7 +489,7 @@ fn spin(params: ChallengeParams, sender: Sender<Result>, stop_signal: Arc<Atomic
         let h = hash(preimage_bytes, &params.rom, NB_LOOPS, NB_INSTRS);
 
         if hash_structure_good(&h, params.difficulty_mask) {
-            if sender.send(Result::Found(nonce_value)).is_ok() {
+            if sender.send(Result::Found(nonce_value, h)).is_ok() {
                 // Sent the found nonce
             }
             return;
@@ -598,7 +599,7 @@ pub fn scavenge(
                         found.len()
                     ));
                 }
-                Result::Found(nonce) => {
+                Result::Found(nonce, _h_output) => {
                     let nonce_hex = format!("{:016x}", nonce);
                     println!("\nFound valid nonce: {}", nonce_hex);
                     found.push(nonce);

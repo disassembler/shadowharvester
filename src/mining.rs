@@ -1,11 +1,25 @@
 // src/mining.rs
 
 use crate::api;
-use crate::data_types::{DataDir, DataDirMnemonic, MiningContext, MiningResult, ChallengeData, PendingSolution, FILE_NAME_FOUND_SOLUTION, is_solution_pending_in_queue, FILE_NAME_RECEIPT};
+use crate::data_types::{DataDir, DataDirMnemonic, MiningContext, MiningResult, ChallengeData, PendingSolution, FILE_NAME_FOUND_SOLUTION, is_solution_pending_in_queue, FILE_NAME_RECEIPT, ManagerCommand};
 use crate::cli::Cli;
 use crate::cardano;
 use crate::utils::{self, next_wallet_deriv_index_for_challenge, print_mining_setup, print_statistics, receipt_exists_for_index, run_single_mining_cycle};
-use std::{fs, path::PathBuf}; // Added fs, path::PathBuf
+use std::fs;
+use std::sync::mpsc::Sender;
+use std::sync::atomic::Ordering;
+use serde_json;
+use hex;
+
+// FIX: Import core logic components from the library crate root
+use shadow_harvester_lib::{
+    build_preimage,
+    ChallengeParams,
+    Result as MinerResult,
+    spin,
+    Rom,
+    RomGenerationType
+};
 
 // ===============================================
 // SOLUTION RECOVERY FUNCTION
@@ -68,12 +82,13 @@ pub fn run_persistent_key_mining(context: MiningContext, skey_hex: &String) -> R
     println!("\n==============================================");
     println!("⛏️  Shadow Harvester: PERSISTENT KEY MINING Mode ({})", if context.cli_challenge.is_some() { "FIXED CHALLENGE" } else { "DYNAMIC POLLING" });
     println!("==============================================");
-    if context.donate_to_option.is_some() { println!("Donation Target: {}", context.donate_to_option.unwrap()); }
+    if context.donate_to_option.is_some() { println!("Donation Target: {}", context.donate_to_option.as_ref().unwrap()); }
 
     let mut current_challenge_id = String::new();
     let mut last_active_challenge_data: Option<ChallengeData> = None;
     loop {
-        let challenge_params = match utils::get_challenge_params(&context.client, &context.api_url, context.cli_challenge, &mut current_challenge_id) {
+        // FIX: Use .as_ref() to convert Option<String> to Option<&String>
+        let challenge_params = match utils::get_challenge_params(&context.client, &context.api_url, context.cli_challenge.as_ref(), &mut current_challenge_id) {
             Ok(Some(params)) => {
                 last_active_challenge_data = Some(params.clone());
                 params
@@ -95,23 +110,30 @@ pub fn run_persistent_key_mining(context: MiningContext, skey_hex: &String) -> R
         };
 
         // Check for unsubmitted solutions from previous run
-        if let Some(base_dir) = context.data_dir {
+        // FIX: Use .as_deref() to convert Option<String> to Option<&str>
+        if let Some(base_dir) = context.data_dir.as_deref() {
             check_for_unsubmitted_solutions(base_dir, &challenge_params.challenge_id, &mining_address, &data_dir)?;
         }
 
-        if let Some(base_dir) = context.data_dir { data_dir.save_challenge(base_dir, &challenge_params)?; }
+        // FIX: Use .as_deref() to convert Option<String> to Option<&str>
+        if let Some(base_dir) = context.data_dir.as_deref() { data_dir.save_challenge(base_dir, &challenge_params)?; }
         print_mining_setup(&context.api_url, Some(mining_address.as_str()), context.threads, &challenge_params);
 
         loop {
             // UPDATED CALL: Removed client and api_url
+            // FIX: Use .as_ref() and .as_deref() for Option<&String> and Option<&str>
             let (result, total_hashes, elapsed_secs) = run_single_mining_cycle(
-                mining_address.clone(), context.threads, context.donate_to_option, &challenge_params, context.data_dir,
+                mining_address.clone(),
+                context.threads,
+                context.donate_to_option.as_ref(), // Option<String> to Option<&String>
+                &challenge_params,
+                context.data_dir.as_deref(), // Option<String> to Option<&str>
             );
             final_hashes = total_hashes; final_elapsed = elapsed_secs;
 
             match result {
                 MiningResult::FoundAndQueued => {
-                    if let Some(ref destination_address) = context.donate_to_option {
+                    if let Some(ref destination_address) = context.donate_to_option.as_ref() {
                         let donation_message = format!("Assign accumulated Scavenger rights to: {}", destination_address);
                         let donation_signature = cardano::cip8_sign(&key_pair, &donation_message);
 
@@ -173,7 +195,7 @@ pub fn run_mnemonic_sequential_mining(cli: &Cli, context: MiningContext, mnemoni
     println!("\n==============================================");
     println!("⛏️  Shadow Harvester: MNEMONIC SEQUENTIAL MINING Mode ({})", if context.cli_challenge.is_some() { "FIXED CHALLENGE" } else { "DYNAMIC POLLING" });
     println!("==============================================");
-    if context.donate_to_option.is_some() { println!("Donation Target: {}", context.donate_to_option.unwrap()); }
+    if context.donate_to_option.is_some() { println!("Donation Target: {}", context.donate_to_option.as_ref().unwrap()); }
 
     loop {
         // --- 1. Challenge Discovery and Initial Index Reset ---
@@ -181,7 +203,8 @@ pub fn run_mnemonic_sequential_mining(cli: &Cli, context: MiningContext, mnemoni
         let old_challenge_id = last_seen_challenge_id.clone();
         current_challenge_id.clear();
 
-        let challenge_params: ChallengeData = match utils::get_challenge_params(&context.client, &context.api_url, context.cli_challenge, &mut current_challenge_id) {
+        // FIX: Use .as_ref() to convert Option<String> to Option<&String>
+        let challenge_params: ChallengeData = match utils::get_challenge_params(&context.client, &context.api_url, context.cli_challenge.as_ref(), &mut current_challenge_id) {
             Ok(Some(params)) => {
                 backoff_challenge.reset();
                 last_active_challenge_data = Some(params.clone());
@@ -189,7 +212,8 @@ pub fn run_mnemonic_sequential_mining(cli: &Cli, context: MiningContext, mnemoni
                     // Create a dummy DataDir with index 0 to calculate the base path for scanning
                     let temp_data_dir = DataDir::Mnemonic(DataDirMnemonic { mnemonic: &mnemonic_phrase, account: cli.mnemonic_account, deriv_index: 0 });
 
-                    let next_index_from_receipts = next_wallet_deriv_index_for_challenge(&cli.data_dir, &params.challenge_id, &temp_data_dir)?;
+                    // We need to pass base_dir as &str
+                    let next_index_from_receipts = next_wallet_deriv_index_for_challenge(&context.data_dir, &params.challenge_id, &temp_data_dir)?;
 
                     // FIX: Take the maximum of the index derived from receipts and the CLI starting index.
                     wallet_deriv_index = next_index_from_receipts.max(cli.mnemonic_starting_index);
@@ -217,7 +241,8 @@ pub fn run_mnemonic_sequential_mining(cli: &Cli, context: MiningContext, mnemoni
 
         // Save challenge details
         let temp_data_dir = DataDir::Mnemonic(DataDirMnemonic { mnemonic: &mnemonic_phrase, account: cli.mnemonic_account, deriv_index: 0 });
-        if let Some(base_dir) = context.data_dir { temp_data_dir.save_challenge(base_dir, &challenge_params)?; }
+        // FIX: Use .as_deref() to convert Option<String> to Option<&str>
+        if let Some(base_dir) = context.data_dir.as_deref() { temp_data_dir.save_challenge(base_dir, &challenge_params)?; }
 
         // --- 2. Continuous Index Skip Check ---
         // This loop ensures we skip indices with existing receipts, even if the index hasn't changed.
@@ -229,7 +254,8 @@ pub fn run_mnemonic_sequential_mining(cli: &Cli, context: MiningContext, mnemoni
             let mining_address_temp = cardano::derive_key_pair_from_mnemonic(&mnemonic_phrase, cli.mnemonic_account, wallet_deriv_index).2.to_bech32().unwrap();
 
             // Check for unsubmitted solutions (recovery file or pending queue)
-            if let Some(base_dir) = context.data_dir {
+            // FIX: Use .as_deref() to convert Option<String> to Option<&str>
+            if let Some(base_dir) = context.data_dir.as_deref() {
                 if wallet_deriv_index >= cli.mnemonic_starting_index {
                     // 1. Check for crash recovery file (found.json)
                     check_for_unsubmitted_solutions(base_dir, &challenge_params.challenge_id, &mining_address_temp, &data_dir)?;
@@ -244,7 +270,8 @@ pub fn run_mnemonic_sequential_mining(cli: &Cli, context: MiningContext, mnemoni
             }
 
             // --- Final Receipt Check (Multi-Path Resumption) ---
-            if let Some(base_dir) = context.data_dir {
+            // FIX: Use .as_deref() to convert Option<String> to Option<&str>
+            if let Some(base_dir) = context.data_dir.as_deref() {
                 // 1. Check Correct Mnemonic Path (where it should be)
                 if receipt_exists_for_index(base_dir, &challenge_params.challenge_id, &wallet_config)? {
                     println!("\nℹ️ Index {} already has a local receipt (Mnemonic path). Skipping.", wallet_deriv_index);
@@ -291,14 +318,19 @@ pub fn run_mnemonic_sequential_mining(cli: &Cli, context: MiningContext, mnemoni
         print_mining_setup(&context.api_url, Some(mining_address.as_str()), context.threads, &challenge_params);
 
         // UPDATED CALL: Removed client and api_url
+        // FIX: Use .as_ref() and .as_deref() for Option<&String> and Option<&str>
         let (result, total_hashes, elapsed_secs) = run_single_mining_cycle(
-            mining_address.clone(), context.threads, context.donate_to_option, &challenge_params, context.data_dir,
+            mining_address.clone(),
+            context.threads,
+            context.donate_to_option.as_ref(), // Option<String> to Option<&String>
+            &challenge_params,
+            context.data_dir.as_deref(), // Option<String> to Option<&str>
         );
 
         // --- 4. Post-Mining Index Advancement ---
         match result {
             MiningResult::FoundAndQueued => {
-                if let Some(ref destination_address) = context.donate_to_option {
+                if let Some(ref destination_address) = context.donate_to_option.as_ref() {
                     // key_pair is available locally in this loop scope
                     let donation_message = format!("Assign accumulated Scavenger rights to: {}", destination_address);
                     let donation_signature = cardano::cip8_sign(&key_pair, &donation_message);
@@ -335,7 +367,7 @@ pub fn run_ephemeral_key_mining(context: MiningContext) -> Result<(), String> {
     println!("\n==============================================");
     println!("⛏️  Shadow Harvester: EPHEMERAL KEY MINING Mode ({})", if context.cli_challenge.is_some() { "FIXED CHALLENGE" } else { "DYNAMIC POLLING" });
     println!("==============================================");
-    if context.donate_to_option.is_some() { println!("Donation Target: {}", context.donate_to_option.unwrap()); }
+    if context.donate_to_option.is_some() { println!("Donation Target: {}", context.donate_to_option.as_ref().unwrap()); }
 
     let mut final_hashes: u64 = 0;
     let mut final_elapsed: f64 = 0.0;
@@ -343,7 +375,8 @@ pub fn run_ephemeral_key_mining(context: MiningContext) -> Result<(), String> {
     let mut last_active_challenge_data: Option<ChallengeData> = None;
 
     loop {
-        let challenge_params: ChallengeData = match utils::get_challenge_params(&context.client, &context.api_url, context.cli_challenge, &mut current_challenge_id) {
+        // FIX: Use .as_ref() to convert Option<String> to Option<&String>
+        let challenge_params: ChallengeData = match utils::get_challenge_params(&context.client, &context.api_url, context.cli_challenge.as_ref(), &mut current_challenge_id) {
             Ok(Some(p)) => {
                 last_active_challenge_data = Some(p.clone());
                 p
@@ -368,7 +401,8 @@ pub fn run_ephemeral_key_mining(context: MiningContext) -> Result<(), String> {
         let generated_mining_address = key_pair.2.to_bech32().unwrap();
         let data_dir = DataDir::Ephemeral(&generated_mining_address);
 
-        if let Some(base_dir) = context.data_dir { data_dir.save_challenge(base_dir, &challenge_params)?; }
+        // FIX: Use .as_deref() to convert Option<String> to Option<&str>
+        if let Some(base_dir) = context.data_dir.as_deref() { data_dir.save_challenge(base_dir, &challenge_params)?; }
         println!("\n[CYCLE START] Generated Address: {}", generated_mining_address);
 
         let reg_message = context.tc_response.message.clone();
@@ -381,14 +415,19 @@ pub fn run_ephemeral_key_mining(context: MiningContext) -> Result<(), String> {
         print_mining_setup(&context.api_url, Some(&generated_mining_address.to_string()), context.threads, &challenge_params);
 
         // UPDATED CALL: Removed client and api_url
+        // FIX: Use .as_ref() and .as_deref() for Option<&String> and Option<&str>
         let (result, total_hashes, elapsed_secs) = run_single_mining_cycle(
-                generated_mining_address.to_string(), context.threads, context.donate_to_option, &challenge_params, context.data_dir,
+                generated_mining_address.to_string(),
+                context.threads,
+                context.donate_to_option.as_ref(), // Option<String> to Option<&String>
+                &challenge_params,
+                context.data_dir.as_deref(), // Option<String> to Option<&str>
             );
         final_hashes = total_hashes; final_elapsed = elapsed_secs;
 
         match result {
             MiningResult::FoundAndQueued => {
-                if let Some(ref destination_address) = context.donate_to_option {
+                if let Some(ref destination_address) = context.donate_to_option.as_ref() {
                     // key_pair is available locally in this loop scope
                     let donation_message = format!("Assign accumulated Scavenger rights to: {}", destination_address);
                     let donation_signature = cardano::cip8_sign(&key_pair, &donation_message);
@@ -411,4 +450,135 @@ pub fn run_ephemeral_key_mining(context: MiningContext) -> Result<(), String> {
         print_statistics(stats_result, final_hashes, final_elapsed);
         println!("\n[CYCLE END] Starting next mining cycle immediately...");
     }
+}
+
+// ===============================================
+// ASYNCHRONOUS MINING DISPATCHER
+// ===============================================
+
+/// Spawns the required number of worker threads to run the scavenge loop
+/// and links the result channel to the main Manager thread.
+pub fn spawn_miner_workers(
+    challenge_params: ChallengeData,
+    threads: u32,
+    mining_address: String,
+    manager_tx: Sender<ManagerCommand>,
+) -> Result<std::sync::Arc<std::sync::atomic::AtomicBool>, String> {
+
+    // This block is duplicated from scavenge (src/lib.rs) but is required here
+    // for ROM generation before spawning the threads.
+    const MB: usize = 1024 * 1024;
+    const GB: usize = 1024 * MB;
+
+    println!("Generating ROM with key: {}", challenge_params.no_pre_mine_key);
+
+    let rom = Rom::new(
+        challenge_params.no_pre_mine_key.as_bytes(),
+        RomGenerationType::TwoStep {
+            pre_size: 16 * MB,
+            mixing_numbers: 4,
+        },
+        GB,
+    );
+    println!("{}", rom.digest);
+
+
+    let (worker_tx, worker_rx) = std::sync::mpsc::channel();
+    let stop_signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // Clone the stop_signal BEFORE moving the original into the thread closure.
+    let stop_signal_to_return = stop_signal.clone();
+
+    let difficulty_mask = u32::from_str_radix(&challenge_params.difficulty, 16).unwrap();
+    let common_params = ChallengeParams {
+        rom_key: challenge_params.no_pre_mine_key.clone(),
+        difficulty_mask,
+        address: mining_address.clone(),
+        challenge_id: challenge_params.challenge_id.clone(),
+        latest_submission: challenge_params.latest_submission.clone(),
+        no_pre_mine_hour: challenge_params.no_pre_mine_hour_str.clone(),
+        rom: std::sync::Arc::new(rom),
+    };
+
+    // The scavenge worker threads are spawned in a temporary scope.
+    std::thread::spawn(move || {
+        // This is a simplified version of the main loop from scavenge in src/lib.rs
+
+        let nb_threads_u64 = threads as u64;
+        let step_size = nb_threads_u64;
+        let mut total_hashes_checked = 0; // Counter for total hashes processed
+        let start_loop = std::time::SystemTime::now(); // Start timer here
+
+        // Spawn actual worker threads (running the core spin function)
+        for thread_id in 0..nb_threads_u64 {
+            let params = common_params.clone();
+            let sender = worker_tx.clone();
+            let stop_signal = stop_signal.clone(); // Clone for each inner thread
+
+            let start_nonce = thread_id;
+
+            std::thread::spawn(move || {
+                spin(params, sender, stop_signal, start_nonce, step_size)
+            });
+        }
+        // Drop the extra sender handle here so the receiver can disconnect once all workers finish/stop
+        drop(worker_tx);
+
+        // Blocking loop to process results from the workers
+        while let Ok(r) = worker_rx.recv() {
+            match r {
+                MinerResult::Progress(sz) => {
+                    total_hashes_checked += sz as u64; // Update hash counter
+                }
+                MinerResult::Found(nonce, h_output) => { // Receive hash h_output
+
+                    let elapsed_time = start_loop.elapsed().unwrap().as_secs_f64(); // Calculate elapsed time
+                    let total_hashes = total_hashes_checked + 1; // Final total hashes
+
+                    // DEBUG PRINT: Confirms this code path is reached and stats are calculated
+                    println!("[DEBUG] Final stats calculated - Time: {}s, Hashes: {}", elapsed_time, total_hashes);
+
+                    // A solution was found! Send it to the Challenge Manager.
+                    let nonce_hex = format!("{:016x}", nonce);
+                    println!("🚀 Solution found by worker. Notifying manager.");
+                    let difficulty_mask = u32::from_str_radix(&challenge_params.difficulty, 16).unwrap();
+
+                    // Calculate preimage and placeholder hash output for error logging
+                    let preimage = build_preimage(
+                        nonce,
+                        &mining_address,
+                        &challenge_params.challenge_id,
+                        difficulty_mask,
+                        &challenge_params.no_pre_mine_key,
+                        &challenge_params.latest_submission,
+                        &challenge_params.no_pre_mine_hour_str,
+                    );
+
+                    // Use hex::encode() to format the [u8; 64] digest array
+                    let hash_output = hex::encode(h_output);
+
+                    let solution = PendingSolution {
+                        address: mining_address.clone(),
+                        challenge_id: challenge_params.challenge_id.clone(),
+                        nonce: nonce_hex,
+                        donation_address: None, // Donation address is handled by the Manager post-solution
+                        preimage,
+                        hash_output,
+                    };
+
+                    if manager_tx.send(ManagerCommand::SolutionFound(solution, total_hashes, elapsed_time)).is_err() {
+                        eprintln!("⚠️ Manager channel closed while sending solution.");
+                    }
+
+                    // Once a solution is found, set the signal to stop remaining workers
+                    stop_signal.store(true, Ordering::Relaxed);
+                    return; // Exit the outer thread after sending the solution
+                }
+            }
+        }
+        println!("⚡ Mining cycle for {} finished/stopped.", mining_address);
+    });
+
+    // Return the cloned Arc which was not moved into the thread.
+    Ok(stop_signal_to_return)
 }

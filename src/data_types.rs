@@ -7,7 +7,7 @@ use reqwest::blocking;
 use serde::{Deserialize, Serialize};
 
 // ===============================================
-// API RESPONSE STRUCTS (Moved from src/api.rs)
+// API RESPONSE STRUCTS (Minimal subset)
 // ===============================================
 
 #[derive(Debug, Deserialize)]
@@ -74,7 +74,7 @@ pub struct ApiErrorResponse {
     pub status_code: Option<u16>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GlobalStatistics {
     pub wallets: u32,
     pub challenges: u16,
@@ -130,15 +130,14 @@ pub struct CliChallengeData {
 
 // Holds the common, validated state for the mining loops.
 #[derive(Debug)]
-pub struct MiningContext<'a> {
+pub struct MiningContext {
     pub client: blocking::Client,
     pub api_url: String,
-    // FIX: Use the struct from its new location
     pub tc_response: TandCResponse,
-    pub donate_to_option: Option<&'a String>,
+    pub donate_to_option: Option<String>,
     pub threads: u32,
-    pub cli_challenge: Option<&'a String>,
-    pub data_dir: Option<&'a str>,
+    pub cli_challenge: Option<String>,
+    pub data_dir: Option<String>,
 }
 
 
@@ -148,22 +147,66 @@ pub struct PendingSolution {
     pub address: String,
     pub challenge_id: String,
     pub nonce: String,
-    pub donation_address: Option<String>, // RE-ADDED this field
+    pub donation_address: Option<String>,
+    // FIX: Add fields for error logging and identification
+    pub preimage: String, // The full string used for hashing
+    pub hash_output: String, // The final Blake2b hash output (hex encoded)
 }
+
+// Holds the details for a submission that failed permanently due to API validation.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct FailedSolution {
+    pub timestamp: String,
+    pub address: String,
+    pub challenge_id: String,
+    pub nonce: String,
+    pub error_message: String,
+    pub preimage: String,
+    pub hash_output: String,
+}
+
 
 // Define a result type for the mining cycle
 #[derive(Debug, PartialEq)]
 pub enum MiningResult {
     FoundAndQueued, // Solution found and saved to local queue
-    #[allow(dead_code)] // The submitter thread produces this result conceptually when processing a queue item, but the miner never constructs it.
-    AlreadySolved, // The solution was successfully submitted by someone else
-    MiningFailed,  // General mining or submission error (e.g., hash not found, transient API error)
+    #[allow(dead_code)]
+    AlreadySolved,
+    MiningFailed,
 }
 
-// --- DataDir Structures and Constants ---
+// --- Central Application Message Bus ---
+
+/// Commands posted TO the Challenge Manager thread.
+pub enum ManagerCommand {
+    /// A new challenge has been received from the Polling or WebSocket client.
+    NewChallenge(ChallengeData),
+    /// A mining thread has successfully found a solution nonce.
+    SolutionFound(PendingSolution, u64, f64),
+    /// Signal to gracefully shut down the manager.
+    Shutdown,
+}
+
+/// Commands posted TO the Submitter (Persistence/Network) thread.
+#[derive(Debug)]
+pub enum SubmitterCommand {
+    /// Command to persist state data (e.g., last processed index, challenge info) in SLED.
+    SaveState(String, String), // Key, Value
+    /// Command to retrieve data from SLED (used for synchronous lookups like next index).
+    /// Value is sent back on the provided response channel.
+    GetState(String, std::sync::mpsc::Sender<Result<Option<String>, String>>),
+    /// Command to initiate solution submission (used in non-WS mode).
+    SubmitSolution(PendingSolution),
+    /// Signal to gracefully shut down the submitter.
+    Shutdown,
+}
+
+
+// --- DataDir Structures and Constants (Kept for Migration/Compatibility) ---
 pub const FILE_NAME_CHALLENGE: &str = "challenge.json";
 pub const FILE_NAME_RECEIPT: &str = "receipt.json";
-pub const FILE_NAME_FOUND_SOLUTION: &str = "found.json"; // (Crash recovery file)
+pub const FILE_NAME_FOUND_SOLUTION: &str = "found.json";
+pub const SLED_KEY_FAILED_SOLUTION: &str = "failed_solution"; // FIX: Added new Sled key prefix
 
 
 #[derive(Debug, Clone, Copy)]
@@ -181,6 +224,8 @@ pub struct DataDirMnemonic<'a> {
 }
 
 impl<'a> DataDir<'a> {
+    // ... (All existing file system impls remain here for migration compatibility)
+    // ...
     pub fn challenge_dir(&'a self, base_dir: &str, challenge_id: &str) -> Result<PathBuf, String> {
         let mut path = PathBuf::from(base_dir);
         path.push(challenge_id);
@@ -230,27 +275,6 @@ impl<'a> DataDir<'a> {
 
         std::fs::write(&path, challenge_json)
             .map_err(|e| format!("Could not write {}: {}", FILE_NAME_CHALLENGE, e))?;
-
-        Ok(())
-    }
-
-    // Only saves the receipt, donation logic removed
-    pub fn save_receipt(&self, base_dir: &str, challenge_id: &str, receipt: &serde_json::Value) -> Result<(), String> {
-        let mut path = self.receipt_dir(base_dir, challenge_id)?;
-        path.push(FILE_NAME_RECEIPT);
-
-        let receipt_json = receipt.to_string();
-
-        let mut file = std::fs::File::create(&path)
-            .map_err(|e| format!("Could not create {}: {}", FILE_NAME_RECEIPT, e))?;
-
-        file.write_all(receipt_json.as_bytes())
-            .map_err(|e| format!("Could not write to {}: {}", FILE_NAME_RECEIPT, e))?;
-
-        file.sync_all()
-            .map_err(|e| format!("Could not sync {}: {}", FILE_NAME_RECEIPT, e))?;
-
-        // Donation file logic is intentionally removed here.
 
         Ok(())
     }
