@@ -26,13 +26,21 @@ use data_types::{PendingSolution, ChallengeData};
 
 
 fn run_app(cli: Cli) -> Result<(), String> {
-    // FIX: setup_app is where the crash originates (due to missing API URL).
+    // setup_app is where the crash originates (due to missing API URL).
     // We rely on the main function logic to ensure setup_app is only called if necessary.
     let context = match utils::setup_app(&cli) {
         Ok(c) => c,
         Err(e) if e == "COMMAND EXECUTED" => return Ok(()),
         Err(e) => return Err(e),
     };
+
+    // Client Clone 1 & API URL Clone 1: For Submitter Thread (state_worker)
+    let submitter_client = context.client.clone();
+    let submitter_api_url = context.api_url.clone();
+
+    // Client Clone 2 & API URL Clone 2: For Polling Thread
+    let polling_client = context.client.clone();
+    let polling_api_url = context.api_url.clone();
 
     // --- MPSC CHANNEL SETUP (The Communication Bus) ---
     let (manager_tx, manager_rx) = mpsc::channel();
@@ -43,29 +51,27 @@ fn run_app(cli: Cli) -> Result<(), String> {
 
 
     // --- THREAD DISPATCH ---
-    let api_url_clone = context.api_url.clone();
-    let client_clone = context.client.clone();
     let data_dir_clone = cli.data_dir.clone().unwrap_or_else(|| "state".to_string());
     let is_websocket_mode = cli.websocket;
 
+    // Submitter Thread (Uses submitter_client, submitter_api_url)
     let _submitter_handle = thread::spawn(move || {
         state_worker::run_state_worker(
             submitter_rx,
-            client_clone,
-            api_url_clone,
+            submitter_client, // Use cloned client
+            submitter_api_url, // Use cloned api_url
             data_dir_clone,
             is_websocket_mode
         )
     });
 
-    // CLONE CLI and CONTEXT components required for the manager thread
+    // Manager Thread (Takes ownership of `context`)
     let manager_cli = cli.clone();
-    let manager_context = context; // Move context (it has the client which doesn't implement Clone)
+    let manager_context = context; // context is moved here
     let submitter_tx_clone = submitter_tx.clone();
-    let manager_tx_clone = manager_tx.clone(); // FIX: Clone manager_tx for the manager thread
+    let manager_tx_clone = manager_tx.clone();
 
     let _manager_handle = thread::spawn(move || {
-        // FIX: Pass manager_tx_clone as the third argument
         challenge_manager::run_challenge_manager(
             manager_rx,
             submitter_tx_clone,
@@ -76,17 +82,17 @@ fn run_app(cli: Cli) -> Result<(), String> {
     });
 
 
+    // Polling Thread (Uses polling_client, polling_api_url)
     if cli.websocket {
         let _ws_handle = thread::spawn(move || {
             println!("🌐 WebSocket client thread started (STUBBED).");
         });
-    } else {
-        let api_url_clone = cli.api_url.clone().unwrap();
+    } else if cli.challenge.is_none() {
+        // Start dedicated HTTP Polling Client
         let manager_tx_clone = manager_tx.clone();
-        let client_clone = utils::create_api_client().unwrap(); // Re-create client for the polling thread
 
         let _polling_handle = thread::spawn(move || {
-            polling_client::run_polling_client(client_clone, api_url_clone, manager_tx_clone)
+            polling_client::run_polling_client(polling_client, polling_api_url, manager_tx_clone) // Use polling clones
         });
     }
 
@@ -120,7 +126,6 @@ fn main() {
                 return;
             }
 
-            // FIX: Split the OR match into two explicit arms.
             Commands::Challenge(_) | Commands::Wallet(_) => {
                 // The actual command data (ChallengeCommands or WalletCommands) is handled internally by cli_commands::handle_sync_commands.
                 match cli_commands::handle_sync_commands(&cli) {

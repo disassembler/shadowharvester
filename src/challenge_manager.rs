@@ -1,7 +1,9 @@
+
+
 // src/challenge_manager.rs
 
 use std::sync::mpsc::{Receiver, Sender};
-use crate::data_types::{ManagerCommand, SubmitterCommand, ChallengeData, PendingSolution, MiningContext, DataDirMnemonic};
+use crate::data_types::{ManagerCommand, SubmitterCommand, ChallengeData, MiningContext, Statistics};
 use std::thread;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
@@ -9,7 +11,6 @@ use crate::cli::Cli;
 use crate::cardano;
 use super::mining;
 use crate::api;
-use crate::backoff::Backoff;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use crate::utils;
@@ -103,22 +104,36 @@ pub fn run_challenge_manager(
     submitter_tx.send(SubmitterCommand::SaveState(SLED_KEY_MINING_MODE.to_string(), initial_mode.clone()))
         .map_err(|_| SUBMITTER_SEND_FAIL.to_string())?; // Replaced unwrap
 
-    // If running in fixed challenge mode, immediately fetch and post the challenge
     if let Some(challenge_str) = context.cli_challenge.as_ref() {
-        // FIX: Borrow the owned String by using &
-        let cli_challenge_data = api::parse_cli_challenge_string(challenge_str)
-            .map_err(|e| format!("Challenge parameter parsing error: {}", e))?;
+        let fixed_challenge_params = if challenge_str.contains(',') {
+            // Case 1: Full 5-part challenge string provided (Existing behavior)
+            let cli_challenge_data = api::parse_cli_challenge_string(challenge_str)
+                .map_err(|e| format!("Challenge parameter parsing error: {}", e))?;
 
-        let fixed_challenge_params = ChallengeData {
-            challenge_id: cli_challenge_data.challenge_id.clone(),
-            difficulty: cli_challenge_data.difficulty.clone(),
-            no_pre_mine_key: cli_challenge_data.no_pre_mine_key.clone(),
-            no_pre_mine_hour_str: cli_challenge_data.no_pre_mine_hour_str.clone(),
-            latest_submission: cli_challenge_data.latest_submission.clone(),
-            challenge_number: 0,
-            day: 0,
-            issued_at: String::new(),
+            // Construct minimal ChallengeData from the CLI string
+            ChallengeData {
+                challenge_id: cli_challenge_data.challenge_id.clone(),
+                difficulty: cli_challenge_data.difficulty.clone(),
+                no_pre_mine_key: cli_challenge_data.no_pre_mine_key.clone(),
+                no_pre_mine_hour_str: cli_challenge_data.no_pre_mine_hour_str.clone(),
+                latest_submission: cli_challenge_data.latest_submission.clone(),
+                challenge_number: 0,
+                day: 0,
+                issued_at: String::new(),
+            }
+        } else {
+            // Case 2: Only Challenge ID provided (New behavior: Lookup from Sled)
+            let challenge_id = challenge_str.trim().to_string();
+            let challenge_key = format!("{}:{}", SLED_KEY_CHALLENGE, challenge_id); // Key format: challenge:<ID>
+
+            let challenge_json = sync_get_state(&submitter_tx, &challenge_key)?
+                .ok_or_else(|| format!("FATAL: Fixed challenge '{}' not found in local Sled DB. Use 'challenge import' or provide a 5-part string.", challenge_id))?;
+
+            // Deserialize the ChallengeData stored in Sled
+            serde_json::from_str::<ChallengeData>(&challenge_json)
+                .map_err(|e| format!("Failed to deserialize challenge data from Sled: {}", e))?
         };
+
 
         println!("🎯 Starting with fixed challenge: {}", fixed_challenge_params.challenge_id);
         if manager_tx.send(ManagerCommand::NewChallenge(fixed_challenge_params)).is_err() {
@@ -138,7 +153,7 @@ pub fn run_challenge_manager(
                     stop_current_miner(&mut current_stop_signal);
 
                     // Check if this is the same challenge we just processed
-                    let is_duplicate = current_challenge.as_ref().map_or(false, |c| c.challenge_id == challenge.challenge_id);
+                    let is_duplicate = current_challenge.as_ref().is_some_and(|c| c.challenge_id == challenge.challenge_id);
 
                     if is_duplicate {
                         if initial_mode != "mnemonic" {
@@ -181,7 +196,7 @@ pub fn run_challenge_manager(
                                  .ok_or_else(|| "FATAL: Mnemonic mode selected but key is missing during derivation.".to_string())?;
 
                             let account = cli.mnemonic_account;
-                            let mut deriv_index: u32;
+                            let deriv_index: u32;
 
                             // FIX 3: Generate the challenge-specific key for the next index
                             let mnemonic_index_key = format!("{}:{}", SLED_KEY_MNEMONIC_INDEX, challenge.challenge_id);
@@ -285,7 +300,7 @@ pub fn run_challenge_manager(
                         );
                     }
 
-                    let mut stats_result = api::fetch_statistics(&context.client, &context.api_url, &mining_address);
+                    let stats_result: Result<Statistics, String> = api::fetch_statistics(&context.client, &context.api_url, &mining_address);
 
                     if let Some((_, pubkey, address_obj)) = key_pair_and_address.as_ref() {
                         let reg_message = context.tc_response.message.clone();
@@ -304,8 +319,6 @@ pub fn run_challenge_manager(
                                     eprintln!("⚠️ Address registration failed for {}: {}. Continuing attempt to mine...", address_str, e);
                                 } else {
                                     println!("📋 Address registered successfully: {}", address_str);
-                                    // Re-fetch stats after successful registration, overwriting the old stats_result
-                                    stats_result = api::fetch_statistics(&context.client, &context.api_url, &address_str);
                                 }
                             }
                         }
@@ -385,7 +398,7 @@ pub fn run_challenge_manager(
                     stop_current_miner(&mut current_stop_signal);
                     submitter_tx.send(SubmitterCommand::Shutdown)
                         .map_err(|_| SUBMITTER_SEND_FAIL.to_string())?;
-                    return Err("Manager received Shutdown command.".to_string()); // Signal main thread to exit gracefully
+                    Err("Manager received Shutdown command.".to_string())// Signal main thread to exit gracefully
                 }
             }
         })(); // End of immediate invocation block

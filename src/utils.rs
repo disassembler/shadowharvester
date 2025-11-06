@@ -61,8 +61,36 @@ fn print_non_active_status(response: &ChallengeResponse) {
     println!("----------------------------------------------");
 }
 
+/// Checks if the submission deadline for a challenge has passed.
+/// Returns Ok(challenge) if valid, or an error string if expired.
+pub fn check_submission_deadline(challenge: ChallengeData) -> Result<ChallengeData, String> {
+    let current_time: DateTime<Utc> = Utc::now();
+
+    let latest_submission_time = match DateTime::parse_from_rfc3339(&challenge.latest_submission) {
+        Ok(dt) => dt.with_timezone(&Utc),
+        Err(e) => {
+            eprintln!("Error parsing submission deadline '{}': {}", challenge.latest_submission, e);
+            // Treat unparseable deadline as a fatal error
+            return Err("FATAL: Challenge deadline is unparseable.".to_string());
+        }
+    };
+
+    if latest_submission_time < current_time {
+        Err(format!(
+            "REJECTED: Challenge {} submission window closed. Deadline: {}",
+            challenge.challenge_id,
+            challenge.latest_submission
+        ))
+    } else {
+        Ok(challenge)
+    }
+}
+
 
 /// Polls the API for the current challenge status and handles challenge change logic.
+/// Note: This function is called from the synchronous mining loops (e.g., in src/mining.rs).
+/// It returns None if it detects a reason to wait (same challenge ID, pre/post period)
+/// but DOES NOT perform the actual thread sleep, leaving that to the caller.
 pub fn poll_for_active_challenge(
     client: &blocking::Client,
     api_url: &str,
@@ -73,37 +101,49 @@ pub fn poll_for_active_challenge(
 
     match challenge_response.code.as_str() {
         "active" => {
+            // The 'challenge' field is guaranteed to be present when code is "active"
             let active_params = challenge_response.challenge.unwrap();
 
-            if active_params.challenge_id != *current_id {
+            // Perform deadline check here
+            let validated_params = match check_submission_deadline(active_params) {
+                Ok(p) => p,
+                Err(e) => {
+                    // FIX: Log the rejection message and return None. No sleep.
+                    println!("\n🛑 {}", e);
+                    *current_id = "".to_string(); // Reset to prevent re-logging same rejection
+                    return Ok(None);
+                }
+            };
+
+            if validated_params.challenge_id != *current_id {
 
                 if current_id.is_empty() {
-                    println!("\n✅ Active challenge found (ID: {}). Starting cycle.", active_params.challenge_id);
+                    println!("\n✅ Active challenge found (ID: {}). Starting cycle.", validated_params.challenge_id);
                 } else {
-                    println!("\n🎉 New active challenge detected (ID: {}). Starting new cycle.", active_params.challenge_id);
+                    println!("\n🎉 New active challenge detected (ID: {}). Starting new cycle.", validated_params.challenge_id);
                 }
 
-                *current_id = active_params.challenge_id.clone();
-                Ok(Some(active_params))
+                *current_id = validated_params.challenge_id.clone();
+                Ok(Some(validated_params))
             } else {
                 // Same challenge, remains active/solved
-                println!("\nℹ️ Challenge ID ({}) remains active/solved. Waiting 5 minutes for a new challenge...", active_params.challenge_id);
-                thread::sleep(Duration::from_secs(5 * 60));
+                println!("\nℹ️ Challenge ID ({}) remains active/solved. Waiting for a new challenge...", validated_params.challenge_id);
+                // FIX: Removed internal thread::sleep.
                 Ok(None)
             }
         }
         "before" => {
             print_non_active_status(&challenge_response);
-            println!("⏳ MINING IS NOT YET ACTIVE. Waiting 5 minutes...");
+            println!("⏳ MINING IS NOT YET ACTIVE. Waiting...");
             *current_id = "".to_string();
-            thread::sleep(Duration::from_secs(5 * 60));
+            // FIX: Removed internal thread::sleep.
             Ok(None)
         }
         "after" => {
             print_non_active_status(&challenge_response);
-            println!("🛑 MINING PERIOD HAS ENDED. Waiting 5 minutes for the next challenge...");
+            println!("🛑 MINING PERIOD HAS ENDED. Waiting for the next challenge...");
             *current_id = "".to_string();
-            thread::sleep(Duration::from_secs(5 * 60));
+            // FIX: Removed internal thread::sleep.
             Ok(None)
         }
         _ => Err(format!("Received unexpected challenge code: {}", challenge_response.code)),
@@ -119,6 +159,8 @@ pub fn get_challenge_params(
     if let Some(challenge_str) = cli_challenge {
         let cli_challenge_data = api::parse_cli_challenge_string(challenge_str)
             .map_err(|e| format!("Challenge parameter parsing error: {}", e))?;
+
+        // Fetch live data (required for submission deadline/hour)
         let live_params = api::get_active_challenge_data(client, api_url)
             .map_err(|e| format!("Could not fetch live challenge status (required for submission deadline/hour): {}", e))?;
 
@@ -128,33 +170,25 @@ pub fn get_challenge_params(
         fixed_challenge_params.difficulty = cli_challenge_data.difficulty.clone();
         fixed_challenge_params.no_pre_mine_hour_str = cli_challenge_data.no_pre_mine_hour_str.clone();
         fixed_challenge_params.latest_submission = cli_challenge_data.latest_submission.clone();
-        let current_time: DateTime<Utc> = Utc::now();
-        let latest_submission_time = match DateTime::parse_from_rfc3339(&fixed_challenge_params.latest_submission) {
-            Ok(dt) => dt.with_timezone(&Utc),
-            Err(e) => {
-                eprintln!("Error parsing target time: {}", e);
-                process::exit(1);
-            }
-        };
+
+        // --- DEADLINE CHECK: Propagate error if expired ---
+        // If expired, this returns Err immediately, causing the Manager/App to exit.
+        let fixed_challenge_params = check_submission_deadline(fixed_challenge_params)?;
 
         if fixed_challenge_params.challenge_id != *current_id {
             println!("\n⚠️ Fixed challenge specified: Using ID {} with Difficulty {}. Live polling disabled.",
                 fixed_challenge_params.challenge_id, fixed_challenge_params.difficulty);
             *current_id = fixed_challenge_params.challenge_id.clone();
         }
-        else if latest_submission_time < current_time {
-            eprintln!("Challenge Submission expired! Exiting!");
-            process::exit(1);
-        }
         else {
              println!("\n⚠️ Fixed challenge ID ({}) is being re-mined.", fixed_challenge_params.challenge_id);
         }
+
         Ok(Some(fixed_challenge_params))
     } else {
         poll_for_active_challenge(client, api_url, current_id)
     }
 }
-
 
 pub fn print_statistics(stats_result: Result<Statistics, String>, total_hashes: u64, elapsed_secs: f64) {
     println!("\n==============================================");
