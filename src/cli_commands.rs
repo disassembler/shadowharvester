@@ -1,11 +1,11 @@
 // src/cli_commands.rs
 
-use crate::cli::{Cli, Commands, ChallengeCommands, WalletCommands};
+use crate::cli::{Cli, Commands, ChallengeCommands, WalletCommands, DbCommands};
 use crate::persistence::Persistence;
-use crate::data_types::{ChallengeData, FailedSolution}; // FIX: Import FailedSolution
+use crate::data_types::{ChallengeData, FailedSolution, BackupEntry};
 use std::path::PathBuf;
 use std::fs;
-use std::collections::{HashSet, HashMap}; // FIX: Import HashMap
+use std::collections::{HashSet, HashMap};
 use crate::data_types::SLED_KEY_FAILED_SOLUTION;
 
 // Key prefixes for SLED to organize data
@@ -15,7 +15,20 @@ const SLED_KEY_PENDING: &str = "pending";
 const SLED_KEY_MNEMONIC_INDEX: &str = "mnemonic_index";
 const SLED_DB_FILENAME: &str = "state.sled";
 
-/// Handles all synchronous persistence-related commands (List, Import, Info, ReceiptInfo, PendingInfo, Wallet).
+/// Helper function to insert a key-value pair only if the key is NOT already present.
+fn sync_insert_if_not_exists(persistence: &Persistence, key: &str, value: &str) -> Result<bool, String> {
+    // Check if the key exists using the Persistence method.
+    match persistence.get(key)? {
+        Some(_) => Ok(false), // Key exists, return false (did not insert)
+        None => {
+            // Key does not exist, insert it.
+            persistence.set(key, value)?;
+            Ok(true) // Return true (inserted)
+        }
+    }
+}
+
+/// Handles all synchronous persistence-related commands (List, Import, Info, ReceiptInfo, PendingInfo, Wallet, Db).
 /// These commands run before the main application loop starts.
 pub fn handle_sync_commands(cli: &Cli) -> Result<(), String> {
 
@@ -468,6 +481,77 @@ pub fn handle_sync_commands(cli: &Cli) -> Result<(), String> {
                             println!("No completed challenges found for this address.");
                         }
                         println!("==============================================");
+                        Ok(())
+                    }
+                }
+            }
+            Commands::Db(cmd) => {
+                match cmd {
+                    DbCommands::Export { file } => {
+                        println!("\n==============================================");
+                        println!("Dumping Sled DB to: {}", file);
+                        println!("==============================================");
+
+                        let mut entries: Vec<BackupEntry> = Vec::new();
+                        let mut count = 0;
+
+                        // Iterate over the entire database
+                        for entry_result in persistence.db.iter() {
+                            match entry_result {
+                                Ok((key_ivec, value_ivec)) => {
+                                    let key = String::from_utf8_lossy(&key_ivec).into_owned();
+                                    let value = String::from_utf8_lossy(&value_ivec).into_owned();
+                                    entries.push(BackupEntry { key, value });
+                                    count += 1;
+                                }
+                                Err(e) => {
+                                    return Err(format!("Sled export iteration error: {}", e));
+                                }
+                            }
+                        }
+
+                        let json_content = serde_json::to_string_pretty(&entries)
+                            .map_err(|e| format!("Failed to serialize database entries to JSON: {}", e))?;
+
+                        fs::write(&file, json_content)
+                            .map_err(|e| format!("Failed to write backup file {}: {}", file, e))?;
+
+                        println!("✅ Export complete. {} key-value pairs backed up.", count);
+                        Ok(())
+                    }
+
+                    DbCommands::Import { file } => {
+                        println!("\n==============================================");
+                        println!("Importing Sled DB from: {}", file);
+                        println!("==============================================");
+
+                        let content = fs::read_to_string(&file)
+                            .map_err(|e| format!("Failed to read backup file {}: {}", file, e))?;
+
+                        let entries: Vec<BackupEntry> = serde_json::from_str(&content)
+                            .map_err(|e| format!("Failed to parse JSON backup file {}: {}", file, e))?;
+
+                        let mut imported_count = 0;
+                        let mut skipped_count = 0;
+
+                        for entry in entries {
+                            match sync_insert_if_not_exists(&persistence, &entry.key, &entry.value) {
+                                Ok(true) => {
+                                    imported_count += 1;
+                                }
+                                Ok(false) => {
+                                    skipped_count += 1;
+                                }
+                                Err(e) => {
+                                    eprintln!("⚠️ Import stopped due to Sled error: {}", e);
+                                    break;
+                                }
+                            }
+                        }
+
+                        println!("✅ Import complete.");
+                        println!("  Imported new items: {}", imported_count);
+                        println!("  Skipped existing items: {}", skipped_count);
                         Ok(())
                     }
                 }

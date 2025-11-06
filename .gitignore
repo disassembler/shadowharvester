@@ -1,6 +1,7 @@
 /target
 .direnv
 result*
+backup.json
 *.skey
 *.vkey
 *.mnemonic

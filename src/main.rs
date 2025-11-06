@@ -126,8 +126,7 @@ fn main() {
                 return;
             }
 
-            Commands::Challenge(_) | Commands::Wallet(_) => {
-                // The actual command data (ChallengeCommands or WalletCommands) is handled internally by cli_commands::handle_sync_commands.
+            Commands::Challenge(_) | Commands::Wallet(_) | Commands::Db(_) => {
                 match cli_commands::handle_sync_commands(&cli) {
                     Ok(_) => println!("\n✅ Command completed successfully."),
                     Err(e) => {

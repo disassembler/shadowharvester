@@ -1,3 +1,5 @@
+
+
 // src/data_types.rs
 
 use std::hash::{Hash, Hasher, DefaultHasher};
@@ -199,6 +201,12 @@ pub enum SubmitterCommand {
     SubmitSolution(PendingSolution),
     /// Signal to gracefully shut down the submitter.
     Shutdown,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BackupEntry {
+    pub key: String,
+    pub value: String,
 }
 
 

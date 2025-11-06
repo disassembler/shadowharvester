@@ -84,6 +84,10 @@ pub enum Commands {
     /// Commands for inspecting known wallet addresses and derivations.
     #[command(subcommand, author, about = "Inspect known wallet addresses")]
     Wallet(WalletCommands),
+
+    /// Commands for backing up and restoring the Sled database.
+    #[command(subcommand, author, about = "Manage Sled database backup and restore")]
+    Db(DbCommands),
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -163,5 +167,22 @@ pub enum WalletCommands {
         /// The Cardano address to inspect.
         #[arg(long)]
         address: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DbCommands {
+    /// Dumps the entire Sled database content to a JSON file.
+    Export {
+        /// The file path to write the JSON backup to.
+        #[arg(long, default_value = "backup.json")]
+        file: String,
+    },
+
+    /// Imports data from a JSON backup file, only inserting new keys (no overwrite).
+    Import {
+        /// The file path of the JSON backup to read from.
+        #[arg(long, default_value = "backup.json")]
+        file: String,
     },
 }

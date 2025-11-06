@@ -8,10 +8,7 @@ use crate::data_types::{
 };
 use reqwest::blocking::{self, Client};
 use std::ffi::OsStr;
-use std::thread;
-use std::time::Duration;
 use chrono::{DateTime, Utc};
-use std::process;
 
 // ===============================================
 // HELPER FUNCTIONS
