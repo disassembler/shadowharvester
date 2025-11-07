@@ -77,6 +77,7 @@ fn run_blocking_submission(
             Err(e) => {
                 // FIX: Check for the nonce consumed/exists error.
                 let is_nonce_consumed = e.contains("Solution already submitted") || e.contains("Solution already exists");
+                let is_deadline_past = e.contains("Submission window closed");
 
                 if is_nonce_consumed {
                     // CRITICAL: Solution is consumed. Set a marker receipt to prevent re-mining this address.
@@ -96,6 +97,13 @@ fn run_blocking_submission(
                     let _ = persistence.db.remove(&pending_key);
 
                     return Err(format!("PERMANENT_ERROR: Solution consumed by network: {}", e));
+                }
+
+                else if is_deadline_past {
+
+                    // TODO return to the manager to determine if it should exit
+                    eprintln!("⚠️ HTTP Submission failed: {}. Exiting because deadline has passed", e);
+                    std::process::exit(1);
                 }
 
                 // All other errors (registration/difficulty mismatch, 5xx) trigger retry.
