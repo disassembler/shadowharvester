@@ -5,7 +5,6 @@ use std::thread;
 use std::sync::mpsc;
 use std::time::Duration;
 use cli::{Cli, Commands};
-use crate::data_types::WebSocketCommand;
 
 // Declare modules
 mod api;
@@ -135,7 +134,6 @@ fn main() {
     if cli.command.is_none() && cli.api_url.is_none() && !cli.websocket {
         eprintln!("❌ FATAL ERROR: must pass --api-url or --websocket or a CLI command");
         std::process::exit(1);
-        return;
     }
 
     // 3. Handle Synchronous Commands (Migration, List, Import, Info, Db)

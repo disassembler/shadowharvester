@@ -12,7 +12,6 @@ use crate::api;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use crate::utils;
-use serde_json;
 
 // Key constants for SLED state
 const SLED_KEY_MINING_MODE: &str = "last_active_key_mode";
@@ -21,7 +20,6 @@ const SLED_KEY_LAST_CHALLENGE: &str = "last_challenge_id";
 const SLED_KEY_CHALLENGE: &str = "challenge";
 const SLED_KEY_RECEIPT: &str = "receipt";
 
-// FIX 1: Define the constant fatal error message for send failures
 const SUBMITTER_SEND_FAIL: &str = "FATAL: Submitter channel closed. Submitter thread likely failed to open Sled DB.";
 
 // Helper function to query the persistence worker and synchronously wait for the response.
@@ -165,14 +163,14 @@ pub fn run_challenge_manager(
                             println!("🎯 Challenge {} is the same. Waiting for miner to stop/exit.", challenge.challenge_id);
                             return Ok(());
                         } else {
-                            // FIX: Mnemonic mode must re-run derivation to skip solved index. Log and proceed.
+                            // Mnemonic mode must re-run derivation to skip solved index. Log and proceed.
                             println!("♻️ Restarting Mnemonic cycle to derive next address.");
                         }
                     }
 
                     current_challenge = Some(challenge.clone());
 
-                    // FIX 2: Save ChallengeData to Sled DB
+                    // Save ChallengeData to Sled DB
                     let challenge_key = format!("{}:{}", SLED_KEY_CHALLENGE, challenge.challenge_id);
                     let challenge_json = serde_json::to_string(&challenge)
                         .map_err(|e| format!("Failed to serialize challenge data: {}", e))?;
@@ -352,7 +350,7 @@ pub fn run_challenge_manager(
                     // 5. Print final statistics before advancing index and triggering restart
                     let address = solution.address.clone();
 
-                    // FIX: Stats fetch is still needed here for printing, but we must check WS mode
+                    // Stats fetch is still needed here for printing, but we must check WS mode
                     let stats_result = if !cli.websocket { // Check WS mode flag
                         api::fetch_statistics(&context.client, &context.api_url, &address)
                     } else {
@@ -360,11 +358,20 @@ pub fn run_challenge_manager(
                         Err("WebSocket mode: API contact skipped.".to_string())
                     };
 
-                    // Print stats only if not in WS mode (or if error is not the WS skip error)
-                    if stats_result.as_ref().map_err(|e| e.as_str()).unwrap_err() != "WebSocket mode: API contact skipped." {
-                        utils::print_statistics(stats_result, total_hashes, elapsed_secs);
-                    } else {
-                        println!("📈 Statistics printing skipped (WebSocket Mode).");
+                    // Use a safe match statement instead of unwrap_err() on Result
+                    match stats_result {
+                        Ok(stats) => {
+                            // Stats were successfully fetched (HTTP mode)
+                            utils::print_statistics(Ok(stats), total_hashes, elapsed_secs);
+                        }
+                        Err(e) if e == "WebSocket mode: API contact skipped." => {
+                            // Stats were intentionally skipped (WS mode)
+                            println!("📈 Statistics printing skipped (WebSocket Mode).");
+                        }
+                        Err(e) => {
+                            // A real error occurred during stats fetch (HTTP mode)
+                            utils::print_statistics(Err(e), total_hashes, elapsed_secs);
+                        }
                     }
 
                     // Add a small delay to ensure the statistics are printed/flushed before the next cycle's output starts.

@@ -9,7 +9,7 @@ use crate::persistence::Persistence;
 use std::sync::mpsc::{Receiver, Sender};
 use crate::api;
 use std::sync::Arc;
-use serde_json::{json, self};
+use serde_json::{self};
 
 
 // CONSTANTS
