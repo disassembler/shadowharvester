@@ -60,6 +60,9 @@ pub struct Cli {
     /// Enable WebSocket mode for receiving challenges and posting solutions.
     #[arg(long)]
     pub websocket: bool,
+    /// The port for the internal WebSocket server to listen on for new challenges.
+    #[arg(long, default_value_t = 8080)]
+    pub ws_port: u16,
 }
 
 

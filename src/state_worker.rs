@@ -1,14 +1,15 @@
 // src/state_worker.rs
 
-use crate::data_types::{PendingSolution, SubmitterCommand};
+use crate::data_types::{PendingSolution, SubmitterCommand, WebSocketCommand};
 use crate::backoff::Backoff;
 use reqwest::blocking::Client;
 use std::path::PathBuf;
 use std::thread;
 use crate::persistence::Persistence;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 use crate::api;
-use std::sync::Arc; // FIX: Added Arc for thread safety
+use std::sync::Arc;
+use serde_json::{json, self};
 
 
 // CONSTANTS
@@ -110,7 +111,7 @@ fn run_blocking_submission(
     }
 }
 
-/// FIX: Decouples the blocking network call from the main worker loop.
+/// Decouples the blocking network call from the main worker loop.
 fn spawn_submission_handler(
     client: Client,
     api_url: String,
@@ -141,6 +142,7 @@ pub fn run_state_worker(
     api_url: String,
     data_dir_base: String,
     is_websocket_mode: bool,
+    ws_tx: Sender<WebSocketCommand>, // Added ws_tx
 ) -> Result<(), String> {
     println!("📦 Starting persistence and submission thread (SLED DB).");
 
@@ -171,7 +173,7 @@ pub fn run_state_worker(
             }
             SubmitterCommand::SubmitSolution(solution) => {
                 if !is_websocket_mode {
-                    // FIX: Spawn a non-blocking thread to handle the submission and retry logic.
+                    // HTTP MODE: Spawn a non-blocking thread to handle the submission and retry logic.
                     spawn_submission_handler(
                         submission_client.clone(),
                         submission_api_url.clone(),
@@ -179,7 +181,11 @@ pub fn run_state_worker(
                         solution, // Move solution into handler
                     );
                 } else {
-                    println!("⚠️ Submission Command Ignored: WebSocket mode is active. Manager should post to WS channel.");
+                    // WS MODE: Forward solution to the WebSocket server thread
+                    if let Err(e) = ws_tx.send(WebSocketCommand::SubmitSolution(solution)) { // Solution is moved here
+                        eprintln!("❌ FATAL ERROR: Failed to forward solution to WebSocket server: {}", e);
+                    }
+                    println!("🚀 Solution queued to be sent via WebSocket.");
                 }
             }
             SubmitterCommand::Shutdown => {

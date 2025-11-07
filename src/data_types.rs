@@ -203,6 +203,13 @@ pub enum SubmitterCommand {
     Shutdown,
 }
 
+/// Commands posted TO the WebSocket Server thread.
+#[derive(Debug)]
+pub enum WebSocketCommand {
+    /// A found solution is ready to be sent back to the external bridge (Tampermonkey).
+    SubmitSolution(PendingSolution),
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct BackupEntry {
     pub key: String,

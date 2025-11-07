@@ -402,7 +402,12 @@ pub fn setup_app(cli: &crate::cli::Cli) -> Result<MiningContext, String> {
     let api_url: String = match cli.api_url.clone() {
         Some(url) => url,
         None => {
-            return Err("The '--api-url' flag must be specified to connect to the Scavenger Mine API.".to_string());
+            // FIX: Allow missing API URL only if in WebSocket mode
+            if cli.websocket {
+                "MOCK_WS_API_URL".to_string()
+            } else {
+                return Err("The '--api-url' flag must be specified to connect to the Scavenger Mine API.".to_string());
+            }
         }
     };
 
@@ -441,15 +446,32 @@ pub fn setup_app(cli: &crate::cli::Cli) -> Result<MiningContext, String> {
     }
 
     // 3. Fetch T&C message (always required for registration payload)
-    let tc_response: TandCResponse = match api::fetch_tandc(&client, &api_url) {
-        Ok(t) => t,
-        Err(e) => return Err(format!("Could not fetch T&C from API URL: {}. Details: {}", api_url, e)),
+    let tc_response: TandCResponse = if cli.websocket {
+        // FIX: In WebSocket mode, skip API contact and use custom placeholder
+        let tos_message = "Please read the Terms of Service at https://sm.midnight.gd. Re-run with --accept-tos if you agree to the terms.".to_string();
+        TandCResponse {
+            version: "WS-MOCK".to_string(),
+            content: tos_message.clone(), // Use custom content
+            message: "MOCK_WS_REGISTRATION_MESSAGE".to_string(), // Keep mock message for signing
+        }
+    } else {
+        match api::fetch_tandc(&client, &api_url) {
+            Ok(t) => t,
+            Err(e) => return Err(format!("Could not fetch T&C from API URL: {}. Details: {}", api_url, e)),
+        }
     };
 
     // 4. Conditional T&C display and acceptance check
     if !cli.accept_tos {
-        println!("Terms and Conditions (Version {}):", tc_response.version);
-        println!("{}", tc_response.content);
+        // FIX: Modify display based on WS mode
+        if cli.websocket {
+             // Directly print the content for WS mode
+             println!("{}", tc_response.content);
+        } else {
+             // Standard display for HTTP mode
+             println!("Terms and Conditions (Version {}):", tc_response.version);
+             println!("{}", tc_response.content);
+        }
         return Err("You must pass the '--accept-tos' flag to proceed with mining.".to_string());
     }
 
