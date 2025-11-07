@@ -69,6 +69,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
         );
         if let Err(e) = result {
             eprintln!("❌ FATAL THREAD ERROR: Submitter failed: {}", e);
+            std::process::exit(1);
         }
     });
 
@@ -89,6 +90,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
         );
         if let Err(e) = result {
             eprintln!("❌ FATAL THREAD ERROR: Manager failed: {}", e);
+            std::process::exit(1);
         }
     });
 
@@ -102,6 +104,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
             let result = websocket_server::start_server(manager_tx_clone, ws_rx, ws_port);
             if let Err(e) = result {
                 eprintln!("❌ FATAL THREAD ERROR: WebSocket Server failed: {}", e);
+                std::process::exit(1);
             }
         });
     } else if cli.challenge.is_none() {
@@ -112,6 +115,7 @@ fn run_app(cli: Cli) -> Result<(), String> {
             let result = polling_client::run_polling_client(polling_client, polling_api_url, manager_tx_clone);
             if let Err(e) = result {
                 eprintln!("❌ FATAL THREAD ERROR: Polling Client failed: {}", e);
+                std::process::exit(1);
             }
         });
     }
@@ -130,6 +134,7 @@ fn main() {
     // we assume this is the test harness running the binary. Exit cleanly to prevent the crash.
     if cli.command.is_none() && cli.api_url.is_none() && !cli.websocket {
         eprintln!("❌ FATAL ERROR: must pass --api-url or --websocket or a CLI command");
+        std::process::exit(1);
         return;
     }
 
