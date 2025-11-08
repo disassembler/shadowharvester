@@ -405,6 +405,8 @@ pub fn setup_app(cli: &crate::cli::Cli) -> Result<MiningContext, String> {
             // FIX: Allow missing API URL only if in WebSocket mode
             if cli.websocket {
                 "MOCK_WS_API_URL".to_string()
+            } else if cli.mock_api_port.is_some() {
+                format!("http://localhost:{}/api", cli.mock_api_port.unwrap())
             } else {
                 return Err("The '--api-url' flag must be specified to connect to the Scavenger Mine API.".to_string());
             }

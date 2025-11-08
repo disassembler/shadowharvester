@@ -22,6 +22,7 @@ mod polling_client;
 mod migrate;
 mod cli_commands;
 mod websocket_server;
+mod mock_api;
 
 use data_types::{PendingSolution, ChallengeData};
 
@@ -129,9 +130,18 @@ fn main() {
     // 1. Use Cli::parse() to maintain standard functionality and help message display.
     let cli = Cli::parse();
 
+    if let Some(port) = cli.mock_api_port {
+        if cli.api_url.is_some() {
+             eprintln!("⚠️ WARNING: --api-url is set but mock server is running. Ensure --api-url is set to http://127.0.0.1:{} for testing or unset it.", port);
+        }
+        mock_api::start_mock_server_thread(port);
+        // Add a short delay to ensure the server starts listening before the client attempts a connection
+        thread::sleep(Duration::from_millis(100));
+    }
+
     // 2. Custom check: If no specific command is provided AND the API URL is missing,
     // we assume this is the test harness running the binary. Exit cleanly to prevent the crash.
-    if cli.command.is_none() && cli.api_url.is_none() && !cli.websocket {
+    if cli.command.is_none() && cli.api_url.is_none() && !cli.websocket && cli.mock_api_port.is_none() {
         eprintln!("❌ FATAL ERROR: must pass --api-url or --websocket or a CLI command");
         std::process::exit(1);
     }

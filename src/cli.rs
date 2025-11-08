@@ -63,6 +63,9 @@ pub struct Cli {
     /// The port for the internal WebSocket server to listen on for new challenges.
     #[arg(long, default_value_t = 8080)]
     pub ws_port: u16,
+    /// The port to run the Mock API server on for testing.**
+    #[arg(long)]
+    pub mock_api_port: Option<u16>,
 }
 
 

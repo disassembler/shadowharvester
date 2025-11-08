@@ -535,9 +535,6 @@ pub fn spawn_miner_workers(
                     let elapsed_time = start_loop.elapsed().unwrap().as_secs_f64(); // Calculate elapsed time
                     let total_hashes = total_hashes_checked + 1; // Final total hashes
 
-                    // DEBUG PRINT: Confirms this code path is reached and stats are calculated
-                    println!("[DEBUG] Final stats calculated - Time: {}s, Hashes: {}", elapsed_time, total_hashes);
-
                     // A solution was found! Send it to the Challenge Manager.
                     let nonce_hex = format!("{:016x}", nonce);
                     println!("🚀 Solution found by worker. Notifying manager.");
