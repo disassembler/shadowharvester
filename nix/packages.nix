@@ -1,10 +1,10 @@
 { inputs, ... }: {
-  perSystem = { system, config, lib, pkgs, ... }: {
-    packages = {
-      shadow-harvester = let
-        naersk-lib = inputs.naersk.lib.${system};
-      in naersk-lib.buildPackage rec {
+  perSystem = { inputs', system, config, lib, pkgs, ... }: {
+    packages = let
+      naerskBuildPackageArgs = rec {
         pname = "shadow-harvester";
+
+        strictDeps = true;
 
         src = with lib.fileset; toSource {
           root = ./..;
@@ -40,6 +40,29 @@
           ];
         };
       };
+    in {
+      shadow-harvester = inputs.naersk.lib.${system}.buildPackage naerskBuildPackageArgs;
+
+      shadow-harvester-x86_64-pc-windows-gnu = (let
+        toolchain = with inputs'.fenix.packages;
+          combine [
+            minimal.rustc
+            minimal.cargo
+            targets.x86_64-pc-windows-gnu.latest.rust-std
+          ];
+      in inputs.naersk.lib.${system}.override {
+        cargo = toolchain;
+        rustc = toolchain;
+      }).buildPackage (naerskBuildPackageArgs // {
+        depsBuildBuild = with pkgs.pkgsCross.mingwW64; naerskBuildPackageArgs.depsBuildBuild or [] ++ [
+          stdenv.cc
+          windows.pthreads
+        ];
+
+        doCheck = false;
+
+        CARGO_BUILD_TARGET = "x86_64-pc-windows-gnu";
+      });
 
       sledtool = pkgs.rustPlatform.buildRustPackage rec {
         pname = "sledtool";
