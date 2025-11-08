@@ -22,6 +22,12 @@
           zlib
         ];
 
+        nativeBuildInputs = with pkgs; [
+          cmake # needed by tests in randomx-rs build script
+        ];
+
+        doCheck = true;
+
         meta = {
           mainProgram = pname;
           maintainers = with lib.maintainers; [
