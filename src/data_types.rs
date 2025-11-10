@@ -1,5 +1,6 @@
 // src/data_types.rs
 
+use std::borrow::Cow;
 use std::hash::{Hash, Hasher, DefaultHasher};
 use std::path::PathBuf;
 use std::io::Write;
@@ -180,7 +181,7 @@ pub struct DataDirMnemonic<'a> {
     pub deriv_index: u32,
 }
 
-fn normalize_challenge_id(challenge_id: &str) -> String {
+fn normalize_challenge_id(challenge_id: &str) -> Cow<str> {
     #[cfg(target_os = "windows")]
     {
         // Directories with '*' are not supported on windows
@@ -188,14 +189,16 @@ fn normalize_challenge_id(challenge_id: &str) -> String {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        challenge_id.to_string()
+        Cow::from(challenge_id)
     }
 }
 
 impl<'a> DataDir<'a> {
     pub fn challenge_dir(&'a self, base_dir: &str, challenge_id: &str) -> Result<PathBuf, String> {
+        let challenge_id_normalized = normalize_challenge_id(challenge_id);
+
         let mut path = PathBuf::from(base_dir);
-        path.push(normalize_challenge_id(challenge_id));
+        path.push(challenge_id_normalized.as_ref());
         Ok(path)
     }
 
