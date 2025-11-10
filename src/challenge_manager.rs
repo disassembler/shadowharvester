@@ -67,9 +67,6 @@ pub fn run_challenge_manager(
     // State maintained by the Manager
     let mut current_stop_signal: Option<Arc<AtomicBool>> = None;
     let mut current_challenge: Option<ChallengeData> = None;
-    let mut last_processed_address: Option<String> = None;
-    // NEW: Stores (original_address, donation_signature_hex) for the *current* cycle
-    let mut last_signing_key_components: Option<(String, String)> = None;
 
     // Initial State Setup: Load Mnemonic from File
     if cli.mnemonic.is_none() {
@@ -149,29 +146,189 @@ pub fn run_challenge_manager(
 
     // Main loop: consumes commands from the central bus
     while let Ok(command) = manager_rx.recv() {
+        let start_mining = |challenge: &ChallengeData| -> Result<Option<Arc<AtomicBool>>, String> {
+            // 2. Determine address and key pair based on mode
+            let (key_pair_and_address, mining_address) = match initial_mode.as_str() {
+                "persistent" => {
+                    // ... (persistent key logic remains the same)
+                    let skey_hex = cli.payment_key.as_ref()
+                        .ok_or_else(|| "FATAL: Persistent mode selected but key is missing.".to_string())?;
+                    let kp = cardano::generate_cardano_key_pair_from_skey(skey_hex);
+                    let address = kp.2.to_bech32().unwrap();
+
+                    println!("Solving for Persistent Address: {}", address);
+                    (Some(kp), address)
+                }
+                "mnemonic" => {
+                    // ... (mnemonic logic remains the same)
+                    let mnemonic = cli.mnemonic.as_ref()
+                         .ok_or_else(|| "FATAL: Mnemonic mode selected but key is missing during derivation.".to_string())?;
+
+                    let account = cli.mnemonic_account;
+                    let deriv_index: u32;
+
+                    let mnemonic_index_key = format!("{}:{}", SLED_KEY_MNEMONIC_INDEX, challenge.challenge_id);
+
+                    if let Ok(Some(index_str)) = sync_get_state(&submitter_tx, &mnemonic_index_key) {
+                        deriv_index = index_str.parse().unwrap_or(cli.mnemonic_starting_index);
+                        println!("▶️ Resuming challenge {} at index {}.", challenge.challenge_id, deriv_index);
+                    } else {
+                        deriv_index = cli.mnemonic_starting_index;
+                        println!("🟢 Starting new challenge {} at index {}.", challenge.challenge_id, deriv_index);
+                    }
+
+                    let mut current_index = deriv_index;
+
+                    loop {
+                        let temp_keypair = cardano::derive_key_pair_from_mnemonic(mnemonic, account, current_index);
+                        let temp_address = temp_keypair.2.to_bech32().unwrap();
+
+                        match sync_check_receipt_exists(&submitter_tx, &temp_address, &challenge.challenge_id) {
+                            Ok(true) => {
+                                println!("⏭ Skipping solved address (Index {}).", current_index);
+                                current_index = current_index.wrapping_add(1);
+                            }
+                            Ok(false) => { break; }
+                            Err(e) => {
+                                eprintln!("⚠️ Sled error during receipt check: {}. Mining at index {} as fallback.", e, current_index);
+                                break;
+                            }
+                        }
+                    }
+
+                    let final_deriv_index = current_index;
+
+                    submitter_tx.send(SubmitterCommand::SaveState(
+                        mnemonic_index_key.clone(), // Use the challenge-specific key
+                        final_deriv_index.to_string())
+                    ).map_err(|_| SUBMITTER_SEND_FAIL.to_string())?;
+
+                    let kp = cardano::derive_key_pair_from_mnemonic(mnemonic, account, final_deriv_index);
+                    let address = kp.2.to_bech32().unwrap();
+
+                    println!("Solving for Address Index {}: {}", final_deriv_index, address);
+
+                    let mnemonic_hash = {
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        mnemonic.hash(&mut hasher);
+                        hasher.finish()
+                    };
+                    let wallet_key = format!(
+                        "{}:{}:{}:{}",
+                        SLED_KEY_MNEMONIC_INDEX,
+                        mnemonic_hash,
+                        account,
+                        final_deriv_index
+                    );
+                    submitter_tx.send(SubmitterCommand::SaveState(wallet_key, address.clone()))
+                        .map_err(|_| SUBMITTER_SEND_FAIL.to_string())?;
+
+                    (Some(kp), address)
+                }
+                "ephemeral" => {
+                    // ... (ephemeral key logic remains the same)
+                    let kp = cardano::generate_cardano_key_and_address();
+                    let address = kp.2.to_bech32().unwrap();
+
+                    println!("Solving for Ephemeral Address: {}", address);
+                    (Some(kp), address)
+                }
+                _ => { return Ok(None); },
+            };
+
+            // 3. Registration
+            let should_contact_api = !cli.websocket; // <-- Check WS mode flag
+
+            if key_pair_and_address.is_some() {
+                // Print setup regardless of WS mode
+                utils::print_mining_setup(
+                    &context.api_url,
+                    Some(&mining_address),
+                    context.threads,
+                    challenge,
+                );
+            }
+
+            let stats_result: Result<Statistics, String> = if should_contact_api {
+                // Only fetch statistics if NOT in WebSocket mode
+                api::fetch_statistics(&context.client, &context.api_url, &mining_address)
+            } else {
+                // In WS mode, return a dummy error that the match block below will handle gracefully.
+                Err("WebSocket mode: API contact skipped.".to_string())
+            };
+
+            if let Some((_key_pair, pubkey, address_obj)) = key_pair_and_address.as_ref() {
+                let reg_message = context.tc_response.message.clone();
+                let address_str = address_obj.to_bech32().unwrap();
+                let reg_signature = cardano::cip8_sign(key_pair_and_address.as_ref().unwrap(), &reg_message);
+
+                // Handle conditional registration and stats print
+                match stats_result {
+                    Ok(ref stats) => { // Stats successfully fetched (implies HTTP mode)
+                         println!("📋 Address {} is already registered (Receipts: {}). Skipping registration.", address_str, stats.crypto_receipts);
+                    },
+                    Err(ref e) if e == "WebSocket mode: API contact skipped." => { // Handle WS skip gracefully
+                        println!("📋 Address registration and statistics fetch skipped (WebSocket Mode).");
+                    }
+                    Err(_) => {
+                        // Stats fetch failed (only happens in HTTP mode). Attempt registration.
+                        if let Err(reg_e) = api::register_address(
+                            &context.client, &context.api_url, &address_str, &reg_message, &reg_signature.0, &hex::encode(pubkey.as_ref()),
+                        ) {
+                            eprintln!("⚠️ Address registration failed for {}: {}. Continuing attempt to mine...", address_str, reg_e);
+                        } else {
+                            println!("📋 Address registered successfully: {}", address_str);
+                            // Re-fetch stats after successful registration, discarding the result with `let _ = ...`
+                            let _ = api::fetch_statistics(&context.client, &context.api_url, &address_str);
+                        }
+                    }
+                }
+
+                // 4. Execute synchronous Donation API call if configured
+                if let Some(donation_address) = context.donate_to_option.as_ref() {
+                    let donation_message = format!("Assign accumulated Scavenger rights to: {}", donation_address);
+
+                    // Generate the signature for the donation message using the current key pair
+                    let (donation_signature, _) = cardano::cip8_sign(key_pair_and_address.as_ref().unwrap(), &donation_message);
+
+                    println!("🚀 Attempting synchronous donation for {}...", mining_address);
+                    match api::donate_to(
+                        &context.client,
+                        &context.api_url,
+                        &mining_address,
+                        donation_address,
+                        &donation_signature,
+                    ) {
+                        Ok(id) => println!("✅ Donation initiated successfully. ID: {}", id),
+                        Err(e) => eprintln!("⚠️ Donation failed (manager attempt): {}", e),
+                    }
+                }
+            }
+
+            // 5. Spawn new miner threads
+            Ok(match key_pair_and_address {
+                Some(_) => {
+                    let stop_signal = Some(mining::spawn_miner_workers(challenge.clone(), context.threads, mining_address.clone(), manager_tx.clone())
+                        .map_err(|e| format!("❌ Failed to spawn miner workers: {}", e))?);
+                    println!("⛏️ Started mining for address: {}", mining_address);
+                    stop_signal
+                },
+                None => None,
+            })
+        };
 
         let cycle_result: Result<(), String> = (|| {
             match command {
                 ManagerCommand::NewChallenge(challenge) => {
-                    // 1. Stop current mining if active
-                    stop_current_miner(&mut current_stop_signal);
-                    last_signing_key_components = None; // Reset signing components
-
-                    // Check if this is the same challenge we just processed
+                    // 1. Check if this is the same challenge we just processed
                     let is_duplicate = current_challenge.as_ref().is_some_and(|c| c.challenge_id == challenge.challenge_id);
 
                     if is_duplicate {
-                        if initial_mode != "mnemonic" {
-                            // Stop persistent/ephemeral mode from re-starting unnecessarily
-                            println!("🎯 Challenge {} is the same. Waiting for miner to stop/exit.", challenge.challenge_id);
-                            return Ok(());
-                        } else {
-                            // Mnemonic mode must re-run derivation to skip solved index. Log and proceed.
-                            println!("♻️ Restarting Mnemonic cycle to derive next address.");
-                        }
+                        // Stop from re-starting unnecessarily
+                        println!("🎯 Challenge {} is the same. Waiting for miner to stop/exit.", challenge.challenge_id);
+                        return Ok(());
                     }
 
-                    current_challenge = Some(challenge.clone());
 
                     // Save ChallengeData to Sled DB
                     let challenge_key = format!("{}:{}", SLED_KEY_CHALLENGE, challenge.challenge_id);
@@ -182,210 +339,25 @@ pub fn run_challenge_manager(
                     submitter_tx.send(SubmitterCommand::SaveState(SLED_KEY_LAST_CHALLENGE.to_string(), challenge.challenge_id.clone()))
                         .map_err(|_| SUBMITTER_SEND_FAIL.to_string())?;
 
+                    let is_mining = current_challenge.is_some();
+                    current_challenge = Some(challenge.clone());
 
-                    // 2. Determine address and key pair based on mode
-                    let (key_pair_and_address, mining_address) = match initial_mode.as_str() {
-                        "persistent" => {
-                            // ... (persistent key logic remains the same)
-                            let skey_hex = cli.payment_key.as_ref()
-                                .ok_or_else(|| "FATAL: Persistent mode selected but key is missing.".to_string())?;
-                            let kp = cardano::generate_cardano_key_pair_from_skey(skey_hex);
-                            let address = kp.2.to_bech32().unwrap();
-
-                            println!("Solving for Persistent Address: {}", address);
-                            (Some(kp), address)
-                        }
-                        "mnemonic" => {
-                            // ... (mnemonic logic remains the same)
-                            let mnemonic = cli.mnemonic.as_ref()
-                                 .ok_or_else(|| "FATAL: Mnemonic mode selected but key is missing during derivation.".to_string())?;
-
-                            let account = cli.mnemonic_account;
-                            let deriv_index: u32;
-
-                            let mnemonic_index_key = format!("{}:{}", SLED_KEY_MNEMONIC_INDEX, challenge.challenge_id);
-
-                            if let Ok(Some(index_str)) = sync_get_state(&submitter_tx, &mnemonic_index_key) {
-                                deriv_index = index_str.parse().unwrap_or(cli.mnemonic_starting_index);
-                                println!("▶️ Resuming challenge {} at index {}.", challenge.challenge_id, deriv_index);
-                            } else {
-                                deriv_index = cli.mnemonic_starting_index;
-                                println!("🟢 Starting new challenge {} at index {}.", challenge.challenge_id, deriv_index);
-                            }
-
-                            let mut current_index = deriv_index;
-
-                            loop {
-                                let temp_keypair = cardano::derive_key_pair_from_mnemonic(mnemonic, account, current_index);
-                                let temp_address = temp_keypair.2.to_bech32().unwrap();
-
-                                match sync_check_receipt_exists(&submitter_tx, &temp_address, &challenge.challenge_id) {
-                                    Ok(true) => {
-                                        println!("⏭ Skipping solved address (Index {}).", current_index);
-                                        current_index = current_index.wrapping_add(1);
-                                    }
-                                    Ok(false) => { break; }
-                                    Err(e) => {
-                                        eprintln!("⚠️ Sled error during receipt check: {}. Mining at index {} as fallback.", e, current_index);
-                                        break;
-                                    }
-                                }
-                            }
-
-                            let final_deriv_index = current_index;
-
-                            submitter_tx.send(SubmitterCommand::SaveState(
-                                mnemonic_index_key.clone(), // Use the challenge-specific key
-                                final_deriv_index.to_string())
-                            ).map_err(|_| SUBMITTER_SEND_FAIL.to_string())?;
-
-                            let kp = cardano::derive_key_pair_from_mnemonic(mnemonic, account, final_deriv_index);
-                            let address = kp.2.to_bech32().unwrap();
-
-                            println!("Solving for Address Index {}: {}", final_deriv_index, address);
-
-                            let mnemonic_hash = {
-                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                                mnemonic.hash(&mut hasher);
-                                hasher.finish()
-                            };
-                            let wallet_key = format!(
-                                "{}:{}:{}:{}",
-                                SLED_KEY_MNEMONIC_INDEX,
-                                mnemonic_hash,
-                                account,
-                                final_deriv_index
-                            );
-                            submitter_tx.send(SubmitterCommand::SaveState(wallet_key, address.clone()))
-                                .map_err(|_| SUBMITTER_SEND_FAIL.to_string())?;
-
-                            (Some(kp), address)
-                        }
-                        "ephemeral" => {
-                            // ... (ephemeral key logic remains the same)
-                            let kp = cardano::generate_cardano_key_and_address();
-                            let address = kp.2.to_bech32().unwrap();
-
-                            println!("Solving for Ephemeral Address: {}", address);
-                            (Some(kp), address)
-                        }
-                        _ => { return Ok(()); },
-                    };
-
-                    // 3. Registration
-                    let should_contact_api = !cli.websocket; // <-- Check WS mode flag
-
-                    if key_pair_and_address.is_some() {
-                        let challenge_data = current_challenge.as_ref().unwrap();
-                        let address_str = mining_address.as_str();
-
-                        // Print setup regardless of WS mode
-                        utils::print_mining_setup(
-                            &context.api_url,
-                            Some(address_str),
-                            context.threads,
-                            challenge_data
-                        );
-                    }
-
-                    let stats_result: Result<Statistics, String> = if should_contact_api {
-                        // Only fetch statistics if NOT in WebSocket mode
-                        api::fetch_statistics(&context.client, &context.api_url, &mining_address)
-                    } else {
-                        // In WS mode, return a dummy error that the match block below will handle gracefully.
-                        Err("WebSocket mode: API contact skipped.".to_string())
-                    };
-
-                    if let Some((_key_pair, pubkey, address_obj)) = key_pair_and_address.as_ref() {
-                        let reg_message = context.tc_response.message.clone();
-                        let address_str = address_obj.to_bech32().unwrap();
-                        let reg_signature = cardano::cip8_sign(key_pair_and_address.as_ref().unwrap(), &reg_message);
-
-                        // Handle conditional registration and stats print
-                        match stats_result {
-                            Ok(ref stats) => { // Stats successfully fetched (implies HTTP mode)
-                                 println!("📋 Address {} is already registered (Receipts: {}). Skipping registration.", address_str, stats.crypto_receipts);
-                            },
-                            Err(ref e) if e == "WebSocket mode: API contact skipped." => { // Handle WS skip gracefully
-                                println!("📋 Address registration and statistics fetch skipped (WebSocket Mode).");
-                            }
-                            Err(_) => {
-                                // Stats fetch failed (only happens in HTTP mode). Attempt registration.
-                                if let Err(reg_e) = api::register_address(
-                                    &context.client, &context.api_url, &address_str, &reg_message, &reg_signature.0, &hex::encode(pubkey.as_ref()),
-                                ) {
-                                    eprintln!("⚠️ Address registration failed for {}: {}. Continuing attempt to mine...", address_str, reg_e);
-                                } else {
-                                    println!("📋 Address registered successfully: {}", address_str);
-                                    // Re-fetch stats after successful registration, discarding the result with `let _ = ...`
-                                    let _ = api::fetch_statistics(&context.client, &context.api_url, &address_str);
-                                }
-                            }
-                        }
-
-                        // 4. CAPTURE KEY COMPONENTS FOR DONATION IN NEXT CYCLE (if donation is configured)
-                        last_signing_key_components = if context.donate_to_option.is_some() {
-                            let destination_address = context.donate_to_option.as_ref().unwrap();
-                            let donation_message = format!("Assign accumulated Scavenger rights to: {}", destination_address);
-
-                            // Generate the signature for the donation message using the current key pair
-                            let (donation_signature, _) = cardano::cip8_sign(key_pair_and_address.as_ref().unwrap(), &donation_message);
-
-                            Some((mining_address.clone(), donation_signature))
-                        } else {
-                            None
-                        };
-                    }
-
-                    // 5. Spawn new miner threads
-                    if key_pair_and_address.is_some() {
-                        match mining::spawn_miner_workers(challenge.clone(), context.threads, mining_address.clone(), manager_tx.clone()) {
-                            Ok(signal) => {
-                                current_stop_signal = Some(signal);
-                                last_processed_address = Some(mining_address.clone());
-                                println!("⛏️ Started mining for address: {}", last_processed_address.as_ref().unwrap());
-                            }
-                            Err(e) => eprintln!("❌ Failed to spawn miner workers: {}", e),
-                        }
+                    if !is_mining {
+                        current_stop_signal = start_mining(&challenge)?;
                     }
 
                     Ok(())
                 }
 
-                ManagerCommand::SolutionFound(mut solution, total_hashes, elapsed_secs) => {
+                ManagerCommand::SolutionFound(solution, total_hashes, elapsed_secs) => {
                     // 1. Stop the current mining cycle to prevent further hashing
                     stop_current_miner(&mut current_stop_signal);
 
-                    // 2. Add donation address to the solution if configured (Submitter needs this)
-                    solution.donation_address = context.donate_to_option.clone();
-
-                    // 3. Queue for submission (State Worker handles network submission and receipt saving)
+                    // 2. Queue for submission (State Worker handles network submission and receipt saving)
                     submitter_tx.send(SubmitterCommand::SubmitSolution(solution.clone()))
                         .map_err(|_| SUBMITTER_SEND_FAIL.to_string())?;
 
-                    // 4. Execute synchronous Donation API call if configured (using stored key components)
-                    if let Some((original_address, donation_signature)) = last_signing_key_components.take() {
-                        if original_address == solution.address {
-                            if let Some(ref destination_address) = context.donate_to_option.as_ref() {
-                                println!("🚀 Attempting synchronous donation for {}...", original_address);
-                                match api::donate_to(
-                                    &context.client,
-                                    &context.api_url,
-                                    &original_address,
-                                    destination_address,
-                                    &donation_signature,
-                                ) {
-                                    Ok(id) => println!("✅ Donation initiated successfully. ID: {}", id),
-                                    Err(e) => eprintln!("⚠️ Donation failed (manager attempt): {}", e),
-                                }
-                            }
-                        } else {
-                            // This should only happen if the address was somehow replaced mid-cycle (e.g., mnemonic mode loop bug)
-                            eprintln!("⚠️ Warning: Found solution for address {} but stored key is for {}. Skipping donation.", solution.address, original_address);
-                        }
-                    }
-
-                    // 5. Print final statistics before advancing index and triggering restart
+                    // 3. Print final statistics before advancing index and triggering restart
                     let address = solution.address.clone();
 
                     // Stats fetch is still needed here for printing, but we must check WS mode
@@ -415,7 +387,9 @@ pub fn run_challenge_manager(
                     // Add a small delay to ensure the statistics are printed/flushed before the next cycle's output starts.
                     thread::sleep(Duration::from_millis(500));
 
-                    // 6. Handle Mnemonic Index Advancement (for next cycle)
+                    // 4. Handle Mnemonic Index Advancement (for next cycle)
+                    // This is not really needed because `start_mining()` skips already solved indices,
+                    // but it leads to better looking logs and a tiny speedup if we do the advancement for it.
                     if initial_mode == "mnemonic" {
 
                         // Construct the challenge-specific key
@@ -434,12 +408,9 @@ pub fn run_challenge_manager(
                                     .map_err(|_| SUBMITTER_SEND_FAIL.to_string())?;
                             }
                         }
-
-                        // Self-trigger the next cycle immediately to pick up the new index/address.
-                        if let Some(challenge_data) = current_challenge.clone() {
-                            manager_tx.send(ManagerCommand::NewChallenge(challenge_data)).unwrap();
-                        }
                     }
+
+                    current_stop_signal = start_mining(current_challenge.as_ref().unwrap())?;
 
                     Ok(())
                 }

@@ -125,7 +125,6 @@ pub fn run_persistent_key_mining(context: MiningContext, skey_hex: &String) -> R
             let (result, total_hashes, elapsed_secs) = run_single_mining_cycle(
                 mining_address.clone(),
                 context.threads,
-                context.donate_to_option.as_ref(), // Option<String> to Option<&String>
                 &challenge_params,
                 context.data_dir.as_deref(), // Option<String> to Option<&str>
             );
@@ -322,7 +321,6 @@ pub fn run_mnemonic_sequential_mining(cli: &Cli, context: MiningContext, mnemoni
         let (result, total_hashes, elapsed_secs) = run_single_mining_cycle(
             mining_address.clone(),
             context.threads,
-            context.donate_to_option.as_ref(), // Option<String> to Option<&String>
             &challenge_params,
             context.data_dir.as_deref(), // Option<String> to Option<&str>
         );
@@ -419,7 +417,6 @@ pub fn run_ephemeral_key_mining(context: MiningContext) -> Result<(), String> {
         let (result, total_hashes, elapsed_secs) = run_single_mining_cycle(
                 generated_mining_address.to_string(),
                 context.threads,
-                context.donate_to_option.as_ref(), // Option<String> to Option<&String>
                 &challenge_params,
                 context.data_dir.as_deref(), // Option<String> to Option<&str>
             );
@@ -558,7 +555,6 @@ pub fn spawn_miner_workers(
                         address: mining_address.clone(),
                         challenge_id: challenge_params.challenge_id.clone(),
                         nonce: nonce_hex,
-                        donation_address: None, // Donation address is handled by the Manager post-solution
                         preimage,
                         hash_output,
                     };

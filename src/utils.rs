@@ -223,7 +223,6 @@ pub fn print_statistics(stats_result: Result<Statistics, String>, total_hashes: 
 pub fn run_single_mining_cycle(
     mining_address: String,
     threads: u32,
-    donate_to_option: Option<&String>,
     challenge_params: &ChallengeData,
     data_dir_base: Option<&str>,
 ) -> (MiningResult, u64, f64) {
@@ -250,7 +249,6 @@ pub fn run_single_mining_cycle(
                 address: mining_address.clone(),
                 challenge_id: challenge_params.challenge_id.clone(),
                 nonce: nonce.clone(),
-                donation_address: donate_to_option.cloned(),
                 // FIX: Add placeholder values for the new fields (synchronous function cannot capture full context)
                 preimage: "Legacy_Preimage_Not_Captured_Sync_Mode".to_string(),
                 hash_output: "Legacy_Hash_Not_Captured_Sync_Mode".to_string(),
