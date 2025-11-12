@@ -174,6 +174,23 @@ pub enum WalletCommands {
         #[arg(long)]
         address: String,
     },
+    /// Iterates through mnemonic derivation indices and runs the donate_to API call until an error is returned.
+    DonateAll {
+        /// The Cardano address (bech32) to donate all accumulated rewards to.
+        #[arg(long)]
+        donate_to: String,
+        /// 24-word BIP39 mnemonic phrase for sequential address generation.
+        #[arg(long)]
+        mnemonic: Option<String>,
+        #[arg(long)]
+        mnemonic_file: Option<String>,
+        /// The mnemonic account index to start derivation from.
+        #[arg(long, default_value_t = 0)]
+        mnemonic_account: u32,
+        /// The starting derivation index.
+        #[arg(long, default_value_t = 0)]
+        mnemonic_starting_index: u32,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

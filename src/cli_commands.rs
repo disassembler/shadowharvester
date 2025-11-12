@@ -3,10 +3,13 @@
 use crate::cli::{Cli, Commands, ChallengeCommands, WalletCommands, DbCommands};
 use crate::persistence::Persistence;
 use crate::data_types::{ChallengeData, FailedSolution, BackupEntry};
+use crate::utils;
+use crate::cardano;
+use crate::api;
+use crate::data_types::SLED_KEY_FAILED_SOLUTION;
 use std::path::PathBuf;
 use std::fs;
 use std::collections::{HashSet, HashMap};
-use crate::data_types::SLED_KEY_FAILED_SOLUTION;
 
 // Key prefixes for SLED to organize data
 const SLED_KEY_CHALLENGE: &str = "challenge";
@@ -483,6 +486,86 @@ pub fn handle_sync_commands(cli: &Cli) -> Result<(), String> {
                         println!("==============================================");
                         Ok(())
                     }
+                    WalletCommands::DonateAll { donate_to, mnemonic, mnemonic_file, mnemonic_account, mnemonic_starting_index } => {
+                        println!("\n==============================================");
+                        println!("💸 Starting Donation Sweep Mode");
+                        println!("==============================================");
+
+                        // --- 1. Mnemonic Source Resolution ---
+                        let mnemonic_phrase: String;
+                        if mnemonic.is_some() && mnemonic_file.is_some() {
+                             return Err("Cannot use both '--mnemonic' and '--mnemonic-file' flags simultaneously.".to_string());
+                        } else if let Some(file_path) = mnemonic_file.as_ref() {
+                            match fs::read_to_string(file_path) {
+                                Ok(content) => {
+                                    mnemonic_phrase = content.trim().to_string();
+                                }
+                                Err(e) => {
+                                    return Err(format!("🚨 Failed to read mnemonic file {}: {}", file_path, e));
+                                }
+                            }
+                        } else if let Some(phrase) = mnemonic {
+                            mnemonic_phrase = phrase;
+                        } else {
+                            return Err("FATAL: Either '--mnemonic' or '--mnemonic-file' must be specified.".to_string());
+                        }
+
+                        // --- 2. API Setup and Validation ---
+                        let api_url = cli.api_url.as_ref()
+                            .ok_or_else(|| "FATAL: --api-url must be specified for donation.".to_string())?;
+
+                        if !cli.accept_tos {
+                            return Err("FATAL: You must pass the '--accept-tos' flag to proceed with donation.".to_string());
+                        }
+
+                        let client = utils::create_api_client()
+                            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+                        let mut index = mnemonic_starting_index;
+                        let donation_message = format!("Assign accumulated Scavenger rights to: {}", donate_to);
+                        let mut success_count: u32 = 0;
+
+                        println!("Destination Address: {}", donate_to);
+                        println!("Starting Account Index: {}", mnemonic_account);
+                        println!("Starting Derivation Index: {}", index);
+                        println!("API URL: {}", api_url);
+                        println!("----------------------------------------------");
+
+                        // --- 3. Iteration and Donation Sweep ---
+                        loop {
+                            let key_pair_result = cardano::derive_key_pair_from_mnemonic(&mnemonic_phrase, mnemonic_account, index);
+                            let original_address = key_pair_result.2.to_bech32().unwrap();
+
+                            print!("Attempting donation for index {} ({})... ", index, original_address);
+
+                            let (donation_signature, _) = cardano::cip8_sign(&key_pair_result, &donation_message);
+
+                            match api::donate_to(&client, api_url, &original_address, &donate_to, &donation_signature) {
+                                Ok(donation_id) => {
+                                    println!("✅ SUCCESS: Donation ID: {}", donation_id);
+                                    success_count = success_count.wrapping_add(1);
+                                    index = index.wrapping_add(1); // Move to the next index
+                                },
+                                Err(e) => {
+                                    if e.contains("API Validation Failed: (Status 400)") {
+                                        println!("🛑 STOPPING SWEEP: API returned an error, assuming end of registered/funded addresses.");
+                                        println!("   Final Error Detail: {}", e);
+                                    } else {
+                                        println!("❌ FATAL API/Network ERROR: Loop terminated unexpectedly.");
+                                        println!("   Error: {}", e);
+                                    }
+
+                                    println!("\n==============================================");
+                                    println!("💸 Donation Sweep Complete. Total Successful Donations: {}", success_count);
+                                    println!("==============================================");
+
+                                    break;
+                                }
+                            }
+                        }
+                    Ok(())
+                    }
+
                 }
             }
             Commands::Db(cmd) => {

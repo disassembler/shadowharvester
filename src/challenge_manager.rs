@@ -68,6 +68,8 @@ pub fn run_challenge_manager(
     let mut current_stop_signal: Option<Arc<AtomicBool>> = None;
     let mut current_challenge: Option<ChallengeData> = None;
     let mut last_processed_address: Option<String> = None;
+    // NEW: Stores (original_address, donation_signature_hex) for the *current* cycle
+    let mut last_signing_key_components: Option<(String, String)> = None;
 
     // Initial State Setup: Load Mnemonic from File
     if cli.mnemonic.is_none() {
@@ -91,7 +93,7 @@ pub fn run_challenge_manager(
         "ephemeral".to_string()
     } else if cli.payment_key.is_some() {
         "persistent".to_string()
-    } else if cli.mnemonic.is_some() {
+    } else if cli.mnemonic.is_some() || cli.mnemonic_file.is_some() {
         "mnemonic".to_string()
     } else {
         return Err("FATAL: No mining mode (ephemeral, payment-key, or mnemonic) configured.".to_string());
@@ -153,6 +155,7 @@ pub fn run_challenge_manager(
                 ManagerCommand::NewChallenge(challenge) => {
                     // 1. Stop current mining if active
                     stop_current_miner(&mut current_stop_signal);
+                    last_signing_key_components = None; // Reset signing components
 
                     // Check if this is the same challenge we just processed
                     let is_duplicate = current_challenge.as_ref().is_some_and(|c| c.challenge_id == challenge.challenge_id);
@@ -293,7 +296,7 @@ pub fn run_challenge_manager(
                         Err("WebSocket mode: API contact skipped.".to_string())
                     };
 
-                    if let Some((_, pubkey, address_obj)) = key_pair_and_address.as_ref() {
+                    if let Some((key_pair, pubkey, address_obj)) = key_pair_and_address.as_ref() {
                         let reg_message = context.tc_response.message.clone();
                         let address_str = address_obj.to_bech32().unwrap();
                         let reg_signature = cardano::cip8_sign(key_pair_and_address.as_ref().unwrap(), &reg_message);
@@ -319,9 +322,22 @@ pub fn run_challenge_manager(
                                 }
                             }
                         }
+
+                        // 4. CAPTURE KEY COMPONENTS FOR DONATION IN NEXT CYCLE (if donation is configured)
+                        last_signing_key_components = if context.donate_to_option.is_some() {
+                            let destination_address = context.donate_to_option.as_ref().unwrap();
+                            let donation_message = format!("Assign accumulated Scavenger rights to: {}", destination_address);
+
+                            // Generate the signature for the donation message using the current key pair
+                            let (donation_signature, _) = cardano::cip8_sign(key_pair_and_address.as_ref().unwrap(), &donation_message);
+
+                            Some((mining_address.clone(), donation_signature))
+                        } else {
+                            None
+                        };
                     }
 
-                    // 4. Spawn new miner threads
+                    // 5. Spawn new miner threads
                     if key_pair_and_address.is_some() {
                         match mining::spawn_miner_workers(challenge.clone(), context.threads, mining_address.clone(), manager_tx.clone()) {
                             Ok(signal) => {
@@ -346,6 +362,28 @@ pub fn run_challenge_manager(
                     // 3. Queue for submission (State Worker handles network submission and receipt saving)
                     submitter_tx.send(SubmitterCommand::SubmitSolution(solution.clone()))
                         .map_err(|_| SUBMITTER_SEND_FAIL.to_string())?;
+
+                    // 4. Execute synchronous Donation API call if configured (using stored key components)
+                    if let Some((original_address, donation_signature)) = last_signing_key_components.take() {
+                        if original_address == solution.address {
+                            if let Some(ref destination_address) = context.donate_to_option.as_ref() {
+                                println!("🚀 Attempting synchronous donation for {}...", original_address);
+                                match api::donate_to(
+                                    &context.client,
+                                    &context.api_url,
+                                    &original_address,
+                                    destination_address,
+                                    &donation_signature,
+                                ) {
+                                    Ok(id) => println!("✅ Donation initiated successfully. ID: {}", id),
+                                    Err(e) => eprintln!("⚠️ Donation failed (manager attempt): {}", e),
+                                }
+                            }
+                        } else {
+                            // This should only happen if the address was somehow replaced mid-cycle (e.g., mnemonic mode loop bug)
+                            eprintln!("⚠️ Warning: Found solution for address {} but stored key is for {}. Skipping donation.", solution.address, original_address);
+                        }
+                    }
 
                     // 5. Print final statistics before advancing index and triggering restart
                     let address = solution.address.clone();
@@ -377,7 +415,7 @@ pub fn run_challenge_manager(
                     // Add a small delay to ensure the statistics are printed/flushed before the next cycle's output starts.
                     thread::sleep(Duration::from_millis(500));
 
-                    // 4. Handle Mnemonic Index Advancement (for next cycle)
+                    // 6. Handle Mnemonic Index Advancement (for next cycle)
                     if initial_mode == "mnemonic" {
 
                         // Construct the challenge-specific key
