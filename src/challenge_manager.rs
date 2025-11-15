@@ -296,7 +296,7 @@ pub fn run_challenge_manager(
                         Err("WebSocket mode: API contact skipped.".to_string())
                     };
 
-                    if let Some((key_pair, pubkey, address_obj)) = key_pair_and_address.as_ref() {
+                    if let Some((_key_pair, pubkey, address_obj)) = key_pair_and_address.as_ref() {
                         let reg_message = context.tc_response.message.clone();
                         let address_str = address_obj.to_bech32().unwrap();
                         let reg_signature = cardano::cip8_sign(key_pair_and_address.as_ref().unwrap(), &reg_message);

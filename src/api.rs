@@ -1,6 +1,8 @@
 // src/api.rs
 
 use reqwest::blocking;
+use std::thread;
+use std::time::Duration;
 
 // FIX: Import structs from the new module location
 use crate::data_types::{
@@ -144,43 +146,130 @@ pub fn donate_to(
     destination_address: &str,
     donation_signature: &str,
 ) -> Result<String, String> {
-
     let url = format!(
         "{}/donate_to/{}/{}/{}",
-        api_url,
+        api_url.trim_end_matches('/'),
         destination_address,
         original_address,
         donation_signature
     );
 
+    // Same empty JSON body as before (explicit for logging)
+    let body = serde_json::json!({});
+    let mut attempt: u32 = 0;
+    let max_attempts: u32 = 3;
+
     println!("-> Donating funds from {} to {}", original_address, destination_address);
 
-    let response = client
-        .post(&url)
-        .header("Content-Type", "application/json; charset=utf-8")
-        .json(&serde_json::json!({}))
-        .send().map_err(|e| format!("Network/Client Error: {}", e))?;
+    while attempt <= max_attempts {
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json; charset=utf-8")
+            .json(&body)
+            .send();
 
-    let status = response.status();
+        match resp {
+            Ok(response) => {
+                let status = response.status();
+                // Read once (text may be JSON or plain)
+                let text = response.text().unwrap_or_default();
 
-    if status.is_success() {
-        let donation_response: DonateResponse = response.json().map_err(|e| format!("Failed to parse successful donation JSON: {}", e))?;
-        println!("✅ Donation successful. Donation ID: {}", donation_response.donation_id);
-        Ok(donation_response.donation_id)
-    } else {
-        let body_text = response.text().unwrap_or_else(|_| format!("Could not read response body for status {}", status));
-        let api_error: Result<ApiErrorResponse, _> = serde_json::from_str(&body_text);
+                // Always log request/response for debugging
+                println!("\n----------------------------------------------");
+                println!("📤 Request:");
+                println!("  URL : {}", url);
+                println!("  Body: {}", body); // prints {}
+                println!("📥 Response:");
+                println!("  Status: {}", status);
+                println!("  Body  : {}", text);
+                println!("----------------------------------------------");
 
-        match api_error {
-            Ok(err) => {
-                // FIX: Use all error fields for detailed reporting
-                Err(format!("Donation Failed: {}", format_detailed_api_error(err, status)))
+                // Treat 2xx as success; 409 as success/“already done”
+                if status.is_success() || status.as_u16() == 409 {
+                    // Try to parse donation_id; if absent (e.g., some 409s), return a marker
+                    if let Ok(parsed) = serde_json::from_str::<DonateResponse>(&text) {
+                        println!("✅ Donation successful. Donation ID: {}", parsed.donation_id);
+                        return Ok(parsed.donation_id);
+                    } else {
+                        println!("✅ SUCCESS/ALREADY DONE (no donation_id in response JSON)");
+                        return Ok("(already-done)".to_string());
+                    }
+                }
+
+                // Handle common 4xx we care about with detailed JSON-parsed error if available
+                match status.as_u16() {
+                    400 | 404 => {
+                        if let Ok(err) = serde_json::from_str::<ApiErrorResponse>(&text) {
+                            return Err(format!(
+                                "Donation Failed: {}",
+                                format_detailed_api_error(err, status)
+                            ));
+                        }
+                        return Err(format!(
+                            "HTTP Error {} with unparseable body: {}",
+                            status.as_u16(),
+                            text
+                        ));
+                    }
+                    // Retryable server / rate limiting / timeout style errors
+                    s if s >= 500 || s == 429 || s == 408 => {
+                        attempt = attempt.saturating_add(1);
+                        if attempt > max_attempts {
+                            break;
+                        }
+                        let wait_ms = 5000u64.saturating_mul(1u64 << (attempt - 1)); // 5s, 10s, 20s
+                        eprintln!(
+                            "⏳ Server {} – retry {}/{} in {}s…",
+                            s,
+                            attempt,
+                            max_attempts,
+                            wait_ms / 1000
+                        );
+                        thread::sleep(Duration::from_millis(wait_ms));
+                        continue;
+                    }
+                    // Other non-retryable 4xx
+                    _ => {
+                        if let Ok(err) = serde_json::from_str::<ApiErrorResponse>(&text) {
+                            return Err(format!(
+                                "Donation Failed: {}",
+                                format_detailed_api_error(err, status)
+                            ));
+                        }
+                        return Err(format!(
+                            "HTTP Error {} with unparseable body: {}",
+                            status.as_u16(),
+                            text
+                        ));
+                    }
+                }
             }
-            Err(_) => {
-                Err(format!("HTTP Error {} with unparseable body: {}", status.as_u16(), body_text))
+            Err(e) => {
+                attempt = attempt.saturating_add(1);
+                let wait_ms = 5000u64.saturating_mul(1u64 << (attempt - 1)); // 5s, 10s, 20s
+                eprintln!(
+                    "\n----------------------------------------------\n\
+                     🌐 NETWORK ERROR on attempt {}/{}\n\
+                     URL : {}\nError: {}\n\
+                     Retrying in {}s…\n----------------------------------------------",
+                    attempt,
+                    max_attempts,
+                    url,
+                    e,
+                    wait_ms / 1000
+                );
+                if attempt > max_attempts {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(wait_ms));
             }
         }
     }
+
+    Err(format!(
+        "Max retries exceeded for original_address {} → destination {}",
+        original_address, destination_address
+    ))
 }
 
 /// Fetches the raw Challenge Response object from the API.

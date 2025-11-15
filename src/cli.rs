@@ -176,6 +176,9 @@ pub enum WalletCommands {
     },
     /// Iterates through mnemonic derivation indices and runs the donate_to API call until an error is returned.
     DonateAll {
+        /// Use base addresses instead of enterprise
+        #[arg(long)]
+        base: bool,
         /// The Cardano address (bech32) to donate all accumulated rewards to.
         #[arg(long)]
         donate_to: String,
@@ -190,6 +193,12 @@ pub enum WalletCommands {
         /// The starting derivation index.
         #[arg(long, default_value_t = 0)]
         mnemonic_starting_index: u32,
+        /// The number of sequential donation indexes to fail on via HTTP 404 before giving up.
+        #[arg(long, default_value_t = 5)]
+        tolerance: u32,
+        /// The maximum number of donate_to iterations, 0 for unlimited.
+        #[arg(long, default_value_t = 0)]
+        max_iteration: u32,
     },
 }
 

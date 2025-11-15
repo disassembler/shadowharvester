@@ -50,6 +50,7 @@ num-integer = "0.1.46"
 tungstenite = "0.28.0"
 warp = "0.3"
 tokio = { version = "1", features = ["full"] }
+regex = "1.12.2"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
