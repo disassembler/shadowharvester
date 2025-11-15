@@ -60,6 +60,12 @@ pub struct Cli {
     /// Enable WebSocket mode for receiving challenges and posting solutions.
     #[arg(long)]
     pub websocket: bool,
+    /// The port for the internal WebSocket server to listen on for new challenges.
+    #[arg(long, default_value_t = 8080)]
+    pub ws_port: u16,
+    /// The port to run the Mock API server on for testing.**
+    #[arg(long)]
+    pub mock_api_port: Option<u16>,
 }
 
 
@@ -84,6 +90,10 @@ pub enum Commands {
     /// Commands for inspecting known wallet addresses and derivations.
     #[command(subcommand, author, about = "Inspect known wallet addresses")]
     Wallet(WalletCommands),
+
+    /// Commands for backing up and restoring the Sled database.
+    #[command(subcommand, author, about = "Manage Sled database backup and restore")]
+    Db(DbCommands),
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -163,5 +173,48 @@ pub enum WalletCommands {
         /// The Cardano address to inspect.
         #[arg(long)]
         address: String,
+    },
+    /// Iterates through mnemonic derivation indices and runs the donate_to API call until an error is returned.
+    DonateAll {
+        /// Use base addresses instead of enterprise
+        #[arg(long)]
+        base: bool,
+        /// The Cardano address (bech32) to donate all accumulated rewards to.
+        #[arg(long)]
+        donate_to: String,
+        /// 24-word BIP39 mnemonic phrase for sequential address generation.
+        #[arg(long)]
+        mnemonic: Option<String>,
+        #[arg(long)]
+        mnemonic_file: Option<String>,
+        /// The mnemonic account index to start derivation from.
+        #[arg(long, default_value_t = 0)]
+        mnemonic_account: u32,
+        /// The starting derivation index.
+        #[arg(long, default_value_t = 0)]
+        mnemonic_starting_index: u32,
+        /// The number of sequential donation indexes to fail on via HTTP 404 before giving up.
+        #[arg(long, default_value_t = 5)]
+        tolerance: u32,
+        /// The maximum number of donate_to iterations, 0 for unlimited.
+        #[arg(long, default_value_t = 0)]
+        max_iteration: u32,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DbCommands {
+    /// Dumps the entire Sled database content to a JSON file.
+    Export {
+        /// The file path to write the JSON backup to.
+        #[arg(long, default_value = "backup.json")]
+        file: String,
+    },
+
+    /// Imports data from a JSON backup file, only inserting new keys (no overwrite).
+    Import {
+        /// The file path of the JSON backup to read from.
+        #[arg(long, default_value = "backup.json")]
+        file: String,
     },
 }

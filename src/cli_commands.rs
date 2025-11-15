@@ -1,12 +1,16 @@
 // src/cli_commands.rs
 
-use crate::cli::{Cli, Commands, ChallengeCommands, WalletCommands};
+use crate::cli::{Cli, Commands, ChallengeCommands, WalletCommands, DbCommands};
 use crate::persistence::Persistence;
-use crate::data_types::{ChallengeData, FailedSolution}; // FIX: Import FailedSolution
-use std::path::PathBuf;
-use std::fs;
-use std::collections::{HashSet, HashMap}; // FIX: Import HashMap
+use crate::data_types::{ChallengeData, FailedSolution, BackupEntry};
+use crate::utils;
+use crate::cardano;
+use crate::api;
 use crate::data_types::SLED_KEY_FAILED_SOLUTION;
+use regex::Regex;
+use std::collections::{HashSet, HashMap};
+use std::fs;
+use std::path::PathBuf;
 
 // Key prefixes for SLED to organize data
 const SLED_KEY_CHALLENGE: &str = "challenge";
@@ -15,7 +19,27 @@ const SLED_KEY_PENDING: &str = "pending";
 const SLED_KEY_MNEMONIC_INDEX: &str = "mnemonic_index";
 const SLED_DB_FILENAME: &str = "state.sled";
 
-/// Handles all synchronous persistence-related commands (List, Import, Info, ReceiptInfo, PendingInfo, Wallet).
+fn http_code_from_err(e: &str) -> Option<u16> {
+    let re = Regex::new(r"\b(\d{3})\b").unwrap();
+    re.captures(e)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse::<u16>().ok())
+}
+
+/// Helper function to insert a key-value pair only if the key is NOT already present.
+fn sync_insert_if_not_exists(persistence: &Persistence, key: &str, value: &str) -> Result<bool, String> {
+    // Check if the key exists using the Persistence method.
+    match persistence.get(key)? {
+        Some(_) => Ok(false), // Key exists, return false (did not insert)
+        None => {
+            // Key does not exist, insert it.
+            persistence.set(key, value)?;
+            Ok(true) // Return true (inserted)
+        }
+    }
+}
+
+/// Handles all synchronous persistence-related commands (List, Import, Info, ReceiptInfo, PendingInfo, Wallet, Db).
 /// These commands run before the main application loop starts.
 pub fn handle_sync_commands(cli: &Cli) -> Result<(), String> {
 
@@ -468,6 +492,210 @@ pub fn handle_sync_commands(cli: &Cli) -> Result<(), String> {
                             println!("No completed challenges found for this address.");
                         }
                         println!("==============================================");
+                        Ok(())
+                    }
+                    WalletCommands::DonateAll { base, donate_to, mnemonic, mnemonic_file, mnemonic_account, mnemonic_starting_index, tolerance, max_iteration } => {
+                        println!("\n==============================================");
+                        println!("💸 Starting Donation Sweep Mode");
+                        println!("==============================================");
+
+                        // 1) Mnemonic resolution (unchanged)
+                        let mnemonic_phrase: String;
+                        if mnemonic.is_some() && mnemonic_file.is_some() {
+                            return Err("Cannot use both '--mnemonic' and '--mnemonic-file' flags simultaneously.".to_string());
+                        } else if let Some(file_path) = mnemonic_file.as_ref() {
+                            match fs::read_to_string(file_path) {
+                                Ok(content) => { mnemonic_phrase = content.trim().to_string(); }
+                                Err(e) => { return Err(format!("🚨 Failed to read mnemonic file {}: {}", file_path, e)); }
+                            }
+                        } else if let Some(phrase) = mnemonic {
+                            mnemonic_phrase = phrase;
+                        } else {
+                            return Err("FATAL: Either '--mnemonic' or '--mnemonic-file' must be specified.".to_string());
+                        }
+
+                        // 2) API setup (unchanged)
+                        let api_url = cli.api_url.as_ref()
+                            .ok_or_else(|| "FATAL: --api-url must be specified for donation.".to_string())?;
+
+                        if !cli.accept_tos {
+                            return Err("FATAL: You must pass the '--accept-tos' flag to proceed with donation.".to_string());
+                        }
+
+                        let client = utils::create_api_client()
+                            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+                        let mut index = mnemonic_starting_index;
+                        let donation_message = format!("Assign accumulated Scavenger rights to: {}", donate_to);
+                        let mut success_count: u32 = 0;
+
+                        println!("Destination Address: {}", donate_to);
+                        println!("Starting Account Index: {}", mnemonic_account);
+                        println!("Starting Derivation Index: {}", index);
+                        println!("API URL: {}", api_url);
+                        println!("Max Iterations: {}", max_iteration);
+                        println!("Tolerance: {}", tolerance);
+                        println!("Message: \"{}\"", donation_message);
+                        println!("----------------------------------------------");
+
+                        let mut consecutive_404s: u32 = 0;
+                        let mut performed: u32 = 0;
+
+                        // 3) Sweep loop with max_iteration cap
+                        loop {
+                            // Respect max_iteration (0 = unlimited)
+                            if max_iteration > 0 && performed >= max_iteration {
+                                println!("⏹ Reached max_iteration limit ({}).", max_iteration);
+                                break;
+                            }
+
+                            let key_pair_result = if base {
+                                cardano::derive_key_pair_from_mnemonic_base(&mnemonic_phrase, mnemonic_account, index)
+                            } else {
+                                cardano::derive_key_pair_from_mnemonic(&mnemonic_phrase, mnemonic_account, index)
+                            };
+
+                            let original_address = key_pair_result.2.to_bech32().unwrap();
+
+                            print!("Attempting donation for index {} ({})... ", index, &original_address);
+
+                            let (donation_signature, _) = cardano::cip8_sign(&key_pair_result, &donation_message);
+
+                            let outcome = api::donate_to(
+                                &client,
+                                api_url,
+                                &original_address,   // <- original first
+                                &donate_to,          // <- destination second
+                                &donation_signature,
+                            );
+
+                            match outcome {
+                                Ok(donation_id) => {
+                                    // Treat 2xx and 409 as success (409 returns "(already-done)")
+                                    if donation_id == "(already-done)" {
+                                        println!("✅ ALREADY MAPPED at index {} ({})", index, original_address);
+                                    } else {
+                                        println!("✅ SUCCESS at index {} — Donation ID: {}", index, donation_id);
+                                    }
+                                    success_count = success_count.wrapping_add(1);
+                                    consecutive_404s = 0;
+                                    index = index.wrapping_add(1);
+                                    performed = performed.wrapping_add(1);
+                                    continue;
+                                }
+                                Err(e) => {
+                                    // Prefer structured classification by HTTP code; fall back to keywords
+                                    let code = http_code_from_err(&e);
+                                    if matches!(code, Some(404)) || e.contains("NotRegistered") {
+                                        // 404 tolerance window
+                                        consecutive_404s = consecutive_404s.saturating_add(1);
+                                        println!("⚠️ 404 ({} of {} tolerance). Continuing.", consecutive_404s, tolerance);
+                                        if consecutive_404s >= tolerance {
+                                            println!("🛑 STOP: exceeded 404 tolerance (>={}). Assuming end of registered/funded addresses.", tolerance);
+                                            break;
+                                        }
+                                        index = index.wrapping_add(1);
+                                        performed = performed.wrapping_add(1);
+                                        continue;
+                                    } else if matches!(code, Some(409)) || e.contains("(already-done)") {
+                                        // Be extra-safe: treat explicit 409 shape as benign success-equivalent
+                                        println!("✅ ALREADY MAPPED (409) at index {} ({})", index, original_address);
+                                        consecutive_404s = 0;
+                                        index = index.wrapping_add(1);
+                                        performed = performed.wrapping_add(1);
+                                        continue;
+                                    } else if matches!(code, Some(400)) || e.contains("BadSig") {
+                                        // Bad signature → skip index, no 404 window bump
+                                        println!("❌ BAD SIG at index {}. Skipping. ({})", index, e);
+                                        index = index.wrapping_add(1);
+                                        performed = performed.wrapping_add(1);
+                                        continue;
+                                    } else if e.contains("Max retries exceeded") {
+                                        println!("❌ Max retries exceeded. Stopping. ({})", e);
+                                        break;
+                                    } else {
+                                        // Other non-retryable 4xx or unexpected error → stop (like original fatal path)
+                                        println!("❌ Non-retryable/Unexpected API error. Stopping. ({})", e);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        println!("\n==============================================");
+                        println!("💸 Donation Sweep Complete. Total Successful Donations: {}", success_count);
+                        println!("==============================================");
+                        Ok(())
+                    }
+                }
+            }
+            Commands::Db(cmd) => {
+                match cmd {
+                    DbCommands::Export { file } => {
+                        println!("\n==============================================");
+                        println!("Dumping Sled DB to: {}", file);
+                        println!("==============================================");
+
+                        let mut entries: Vec<BackupEntry> = Vec::new();
+                        let mut count = 0;
+
+                        // Iterate over the entire database
+                        for entry_result in persistence.db.iter() {
+                            match entry_result {
+                                Ok((key_ivec, value_ivec)) => {
+                                    let key = String::from_utf8_lossy(&key_ivec).into_owned();
+                                    let value = String::from_utf8_lossy(&value_ivec).into_owned();
+                                    entries.push(BackupEntry { key, value });
+                                    count += 1;
+                                }
+                                Err(e) => {
+                                    return Err(format!("Sled export iteration error: {}", e));
+                                }
+                            }
+                        }
+
+                        let json_content = serde_json::to_string_pretty(&entries)
+                            .map_err(|e| format!("Failed to serialize database entries to JSON: {}", e))?;
+
+                        fs::write(&file, json_content)
+                            .map_err(|e| format!("Failed to write backup file {}: {}", file, e))?;
+
+                        println!("✅ Export complete. {} key-value pairs backed up.", count);
+                        Ok(())
+                    }
+
+                    DbCommands::Import { file } => {
+                        println!("\n==============================================");
+                        println!("Importing Sled DB from: {}", file);
+                        println!("==============================================");
+
+                        let content = fs::read_to_string(&file)
+                            .map_err(|e| format!("Failed to read backup file {}: {}", file, e))?;
+
+                        let entries: Vec<BackupEntry> = serde_json::from_str(&content)
+                            .map_err(|e| format!("Failed to parse JSON backup file {}: {}", file, e))?;
+
+                        let mut imported_count = 0;
+                        let mut skipped_count = 0;
+
+                        for entry in entries {
+                            match sync_insert_if_not_exists(&persistence, &entry.key, &entry.value) {
+                                Ok(true) => {
+                                    imported_count += 1;
+                                }
+                                Ok(false) => {
+                                    skipped_count += 1;
+                                }
+                                Err(e) => {
+                                    eprintln!("⚠️ Import stopped due to Sled error: {}", e);
+                                    break;
+                                }
+                            }
+                        }
+
+                        println!("✅ Import complete.");
+                        println!("  Imported new items: {}", imported_count);
+                        println!("  Skipped existing items: {}", skipped_count);
                         Ok(())
                     }
                 }

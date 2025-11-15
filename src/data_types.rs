@@ -1,3 +1,5 @@
+
+
 // src/data_types.rs
 
 use std::borrow::Cow;
@@ -200,6 +202,19 @@ pub enum SubmitterCommand {
     SubmitSolution(PendingSolution),
     /// Signal to gracefully shut down the submitter.
     Shutdown,
+}
+
+/// Commands posted TO the WebSocket Server thread.
+#[derive(Debug)]
+pub enum WebSocketCommand {
+    /// A found solution is ready to be sent back to the external bridge (Tampermonkey).
+    SubmitSolution(PendingSolution),
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BackupEntry {
+    pub key: String,
+    pub value: String,
 }
 
 
