@@ -63,19 +63,27 @@ pub fn derive_key_pair_from_mnemonic(mnemonic: &str, account: u32, index: u32) -
         .derive(ed25519_bip32::DerivationScheme::V2, 0)
         .derive(ed25519_bip32::DerivationScheme::V2, index)
         .extended_secret_key();
+    // stake key 1852'/1815'/<account>'/2/<index>
+    let stake_xprv = &xprv
+        .derive(ed25519_bip32::DerivationScheme::V2, harden_index(1852))
+        .derive(ed25519_bip32::DerivationScheme::V2, harden_index(1815))
+        .derive(ed25519_bip32::DerivationScheme::V2, harden_index(account))
+        .derive(ed25519_bip32::DerivationScheme::V2, 2)
+        .derive(ed25519_bip32::DerivationScheme::V2, index)
+        .extended_secret_key();
     unsafe {
-        let sk = SecretKeyExtended::from_bytes_unchecked(*pay_xprv);
-        let vk = sk.public_key();
+        let pay_priv = SecretKeyExtended::from_bytes_unchecked(*pay_xprv);
+        let pay_pub = pay_priv.public_key();
+        let stake_pub = SecretKeyExtended::from_bytes_unchecked(*stake_xprv).public_key();
 
-        // Cardano (Shelley) address derivation
         let addr = ShelleyAddress::new(
-            Network::Mainnet, // Assuming Mainnet environment
-            ShelleyPaymentPart::key_hash(vk.compute_hash()),
-            ShelleyDelegationPart::Null
+            Network::Mainnet,
+            ShelleyPaymentPart::key_hash(pay_pub.compute_hash()),
+            ShelleyDelegationPart::key_hash(stake_pub.compute_hash())
         );
-        let sk_flex: FlexibleSecretKey = FlexibleSecretKey::Extended(sk);
+        let sk_flex: FlexibleSecretKey = FlexibleSecretKey::Extended(pay_priv);
 
-        (sk_flex, vk, addr)
+        (sk_flex, pay_pub, addr)
     }
 
 }
