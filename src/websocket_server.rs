@@ -1,7 +1,7 @@
 // src/websocket_server.rs
 
-use crate::data_types::{ChallengeResponse, ManagerCommand, WebSocketCommand, PendingSolution}; // <-- NEW: Added WebSocketCommand, PendingSolution
-use std::sync::mpsc::{Sender, Receiver, TryRecvError}; // <-- NEW: Added Receiver, TryRecvError
+use crate::data_types::{ChallengeResponse, ManagerCommand, WebSocketCommand, PendingSolution};
+use std::sync::mpsc::{Sender, Receiver, TryRecvError};
 use std::net::{TcpListener, SocketAddr, TcpStream};
 use tungstenite::{accept, Message, Error as TungsteniteError};
 use serde_json::{self, Value};
@@ -44,16 +44,24 @@ pub fn start_server(
         };
 
         let stream: TcpStream = stream?;
-        stream.set_nonblocking(false)
-            .map_err(|e| format!("Failed to set blocking stream: {}", e))?;
+        // FIX: Set stream to NON-BLOCKING so the inner loop can check solution_rx
+        stream.set_nonblocking(true)
+            .map_err(|e| format!("Failed to set non-blocking stream: {}", e))?;
 
 
         match accept(stream) {
             Ok(mut websocket) => {
                 println!("🌐 WebSocket client connected. Awaiting challenge posts...");
 
+                // FIX: Immediately tell the Manager to sweep for pending solutions
+                if manager_tx.send(ManagerCommand::SweepPendingSolutions).is_err() {
+                    eprintln!("⚠️ Manager channel closed on Sweep request. Connection aborting.");
+                    // Break the outer loop and return Err
+                    break Err("Manager channel closed during WS connection attempt.".to_string());
+                }
+
                 // Inner loop handles open connection
-                loop {
+                let _ = loop { // FIX: Use let _ = loop to consume the loop's result value
                     // Check for incoming challenges (from client)
                     let client_msg_result = websocket.read();
 
@@ -65,7 +73,8 @@ pub fn start_server(
                         Err(TryRecvError::Empty) => { /* Continue */ }
                         Err(TryRecvError::Disconnected) => {
                             eprintln!("❌ Core solution channel closed. Shutting down WS server.");
-                            return Err("Core solution channel closed.".to_string());
+                            // Break the outer loop and return Err
+                            break Err("Core solution channel closed.".to_string());
                         }
                     }
 
@@ -77,7 +86,12 @@ pub fn start_server(
 
                                 match handle_incoming_challenge(text, &manager_tx) {
                                     Ok(_) => {
-                                        let _ = websocket.send(Message::Text("Challenge accepted.".to_string().into()));
+                                        // FIX: Wrap the acknowledgment in valid JSON
+                                        let ack_json = serde_json::json!({
+                                            "type": "ack",
+                                            "status": "Challenge accepted."
+                                        }).to_string();
+                                        let _ = websocket.send(Message::Text(ack_json.into()));
                                     }
                                     Err(e) => {
                                         eprintln!("⚠️ WS Challenge Handling Error: {}", e);
@@ -86,13 +100,21 @@ pub fn start_server(
                                 }
                             }
                         }
+                        // FIX: Handle the non-blocking I/O error (no data from client)
+                        Err(TungsteniteError::Io(ref io_err)) if io_err.kind() == ErrorKind::WouldBlock => {
+                            /* Continue */
+                        }
                         Err(e) => {
                             // Client disconnected or error occurred
                             handle_websocket_disconnect(e);
-                            break; // Exit inner loop to wait for new TCP connection
+                            // FIX: Provide Ok(()) to the break statement
+                            break Ok(());
                         }
                     }
-                }
+
+                    // FIX: Add a small sleep here to prevent the thread from spinning at 100% CPU
+                    thread::sleep(Duration::from_millis(5));
+                };
             }
             Err(e) => {
                 eprintln!("⚠️ Failed to establish WebSocket connection: {}", e);

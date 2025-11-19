@@ -1,8 +1,5 @@
-
-
 // src/data_types.rs
 
-use std::borrow::Cow;
 use std::hash::{Hash, Hasher, DefaultHasher};
 use std::path::PathBuf;
 use std::io::Write;
@@ -188,6 +185,8 @@ pub enum ManagerCommand {
     SolutionFound(PendingSolution, u64, f64),
     /// Signal to gracefully shut down the manager.
     Shutdown,
+    /// Command from the WebSocket server to initiate a sweep of all pending solutions.
+    SweepPendingSolutions,
 }
 
 /// Commands posted TO the Submitter (Persistence/Network) thread.
@@ -202,6 +201,8 @@ pub enum SubmitterCommand {
     SubmitSolution(PendingSolution),
     /// Signal to gracefully shut down the submitter.
     Shutdown,
+    /// Command to sweep all pending solutions from SLED and send them to the WS client.
+    SweepPendingSolutions,
 }
 
 /// Commands posted TO the WebSocket Server thread.
@@ -239,26 +240,12 @@ pub struct DataDirMnemonic<'a> {
     pub deriv_index: u32,
 }
 
-fn normalize_challenge_id(challenge_id: &str) -> Cow<str> {
-    #[cfg(target_os = "windows")]
-    {
-        // Directories with '*' are not supported on windows
-        challenge_id.replace("*", "").into()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        challenge_id.into()
-    }
-}
-
 impl<'a> DataDir<'a> {
     // ... (All existing file system impls remain here for migration compatibility)
     // ...
     pub fn challenge_dir(&'a self, base_dir: &str, challenge_id: &str) -> Result<PathBuf, String> {
-        let challenge_id_normalized = normalize_challenge_id(challenge_id);
-
         let mut path = PathBuf::from(base_dir);
-        path.push(challenge_id_normalized.as_ref());
+        path.push(challenge_id);
         Ok(path)
     }
 
@@ -317,7 +304,7 @@ impl<'a> DataDir<'a> {
             .map_err(|e| format!("Could not create pending_submissions directory: {}", e))?;
 
         // Use a unique file name based on challenge, address, and nonce
-        path.push(format!("{}_{}_{}.json", solution.address, normalize_challenge_id(&solution.challenge_id), solution.nonce));
+        path.push(format!("{}_{}_{}.json", solution.address, solution.challenge_id, solution.nonce));
 
         let solution_json = serde_json::to_string(solution)
             .map_err(|e| format!("Could not serialize pending solution: {}", e))?;
@@ -374,7 +361,7 @@ pub fn is_solution_pending_in_queue(base_dir: &str, address: &str, challenge_id:
             if let Some(filename) = entry.file_name().to_str() {
                 // Check if the filename starts with the required prefix and is a JSON file
                 // The filename format is: address_challenge_id_nonce.json
-                if filename.starts_with(&format!("{}_{}_", address, normalize_challenge_id(&challenge_id))) && filename.ends_with(".json") {
+                if filename.starts_with(&format!("{}_{}_", address, challenge_id)) && filename.ends_with(".json") {
                     return Ok(true);
                 }
             }

@@ -444,6 +444,14 @@ pub fn run_challenge_manager(
                     Ok(())
                 }
 
+                ManagerCommand::SweepPendingSolutions => {
+                    println!("🧹 Manager received Sweep command from WebSocket client. Forwarding to Submitter.");
+                    // FIX: Forward the Sweep command to the persistence worker
+                    submitter_tx.send(SubmitterCommand::SweepPendingSolutions)
+                        .map_err(|_| SUBMITTER_SEND_FAIL.to_string())?;
+                    Ok(())
+                }
+
                 ManagerCommand::Shutdown => {
                     println!("🚨 Manager received shutdown signal. Stopping miner and exiting.");
                     stop_current_miner(&mut current_stop_signal);
