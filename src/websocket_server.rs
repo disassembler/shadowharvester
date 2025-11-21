@@ -166,23 +166,15 @@ fn handle_websocket_disconnect(e: TungsteniteError) {
 }
 
 fn handle_incoming_challenge(json_payload: &str, manager_tx: &Sender<ManagerCommand>) -> Result<(), String> {
-    // ... (logic remains the same)
     let challenge_response: ChallengeResponse = serde_json::from_str(json_payload)
         .map_err(|e| format!("Failed to parse JSON payload as ChallengeResponse: {}", e))?;
 
-    match challenge_response.code.as_str() {
-        "active" => {
-            if let Some(challenge_data) = challenge_response.challenge {
-                println!("🌐 Received new ACTIVE challenge {} via WebSocket. Forwarding to Manager.", challenge_data.challenge_id);
-                manager_tx.send(ManagerCommand::NewChallenge(challenge_data))
-                    .map_err(|_| "Manager channel closed (Manager thread crashed or shut down).".to_string())?;
-                Ok(())
-            } else {
-                Err("Received 'active' status but challenge data is missing.".to_string())
-            }
+        if let Some(challenge_data) = challenge_response.challenge {
+            println!("🌐 Received new ACTIVE challenge {} via WebSocket. Forwarding to Manager.", challenge_data.challenge_id);
+            manager_tx.send(ManagerCommand::NewChallenge(challenge_data))
+                .map_err(|_| "Manager channel closed (Manager thread crashed or shut down).".to_string())?;
+            Ok(())
+        } else {
+            Err("Received 'active' status but challenge data is missing.".to_string())
         }
-        "before" => Err(format!("Received challenge status 'before' (starts at: {:?}). Ignoring.", challenge_response.starts_at)),
-        "after" => Err("Received challenge status 'after'. Mining period has ended. Ignoring.".to_string()),
-        _ => Err(format!("Received unknown challenge status code: {}", challenge_response.code)),
-    }
 }

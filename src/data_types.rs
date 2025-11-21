@@ -43,14 +43,10 @@ pub struct ChallengeData {
 
 #[derive(Debug, Deserialize)]
 pub struct ChallengeResponse {
-    pub code: String,
     pub challenge: Option<ChallengeData>,
     pub starts_at: Option<String>,
     // Fields for listing command (overall status)
-    pub mining_period_ends: Option<String>,
-    pub max_day: Option<u8>,
     pub total_challenges: Option<u16>,
-    pub current_day: Option<u8>,
     pub next_challenge_starts_at: Option<String>,
 }
 
