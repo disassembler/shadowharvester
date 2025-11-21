@@ -26,44 +26,29 @@ pub fn run_polling_client(
 
         match result {
             Ok(challenge_response) => {
-                match challenge_response.code.as_str() {
-                    "active" => {
-                        // The 'challenge' field is guaranteed to be present when code is "active"
-                        let active_params = challenge_response.challenge.unwrap();
+                let active_params = challenge_response.challenge.unwrap();
 
-                        // FIX: Perform the submission deadline check.
-                        let active_params = match utils::check_submission_deadline(active_params) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                // Deadline expired. Log and continue the loop, which will sleep for POLLING_INTERVAL_SECS.
-                                println!("\n🛑 {}", e);
-                                current_challenge_id.clear(); // Ensure we log it next time too if still active
-                                continue;
-                            }
-                        };
-
-
-                        if active_params.challenge_id != current_challenge_id {
-                            println!("🌍 Poller found NEW active challenge: {}. Notifying manager.", active_params.challenge_id);
-
-                            // Send the new challenge to the Manager thread
-                            if manager_tx.send(ManagerCommand::NewChallenge(active_params.clone())).is_err() {
-                                eprintln!("⚠️ Manager channel closed. Shutting down polling.");
-                                return Ok(());
-                            }
-                            current_challenge_id = active_params.challenge_id;
-                        }
+                // FIX: Perform the submission deadline check.
+                let active_params = match utils::check_submission_deadline(active_params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        // Deadline expired. Log and continue the loop, which will sleep for POLLING_INTERVAL_SECS.
+                        println!("\n🛑 {}", e);
+                        current_challenge_id.clear(); // Ensure we log it next time too if still active
+                        continue;
                     }
-                    "before" | "after" => {
-                         // Non-active states, reset the tracked ID if a challenge was previously active
-                         if !current_challenge_id.is_empty() {
-                            println!("🌍 Challenge ended. Resetting ID.");
-                            current_challenge_id.clear();
-                        }
+                };
+
+
+                if active_params.challenge_id != current_challenge_id {
+                    println!("🌍 Poller found NEW active challenge: {}. Notifying manager.", active_params.challenge_id);
+
+                    // Send the new challenge to the Manager thread
+                    if manager_tx.send(ManagerCommand::NewChallenge(active_params.clone())).is_err() {
+                        eprintln!("⚠️ Manager channel closed. Shutting down polling.");
+                        return Ok(());
                     }
-                    _ => {
-                        eprintln!("⚠️ Poller received unexpected challenge code: {}", challenge_response.code);
-                    }
+                    current_challenge_id = active_params.challenge_id;
                 }
             }
             Err(e) => {

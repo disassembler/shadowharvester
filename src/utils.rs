@@ -6,6 +6,7 @@ use crate::data_types::{
     DataDir, DataDirMnemonic, MiningContext, MiningResult, FILE_NAME_RECEIPT,
     ChallengeData, Statistics, TandCResponse, ChallengeResponse, PendingSolution, FILE_NAME_FOUND_SOLUTION
 };
+use crate::constants::{DEFENSIO_REGISTRATION_MESSAGE, DEFENSIO_TOS_VERSION, DEFENSIO_TOS_CONTENT};
 use reqwest::blocking::{self, Client};
 use std::ffi::OsStr;
 use chrono::{DateTime, Utc};
@@ -31,30 +32,12 @@ pub fn create_api_client() -> Result<Client, reqwest::Error> {
 /// Helper to print non-active challenge status
 fn print_non_active_status(response: &ChallengeResponse) {
     println!("\n==============================================");
-    println!("⏰ Challenge Status: {}", response.code.to_uppercase());
-    println!("==============================================");
 
-    if let Some(day) = response.current_day {
-        println!("Current Mining Day: {} / {}", day, response.max_day.unwrap_or(0));
-    } else if let Some(max_day) = response.max_day {
-         println!("Total Mining Days: {}", max_day);
-    }
 
-    if let Some(ends) = &response.mining_period_ends {
-        println!("Mining Period Ends: {}", ends);
-    }
     if let Some(total) = response.total_challenges {
         println!("Total Challenges (All Days): {}", total);
     }
 
-    if response.code == "before" {
-        if let Some(starts) = &response.starts_at {
-            println!("Challenge Starts At: {}", starts);
-        }
-        if let Some(next_starts) = &response.next_challenge_starts_at {
-            println!("Next Challenge Starts At: {}", next_starts);
-        }
-    }
     println!("----------------------------------------------");
 }
 
@@ -96,9 +79,7 @@ pub fn poll_for_active_challenge(
 
     let challenge_response = api::fetch_challenge_status(client, api_url)?;
 
-    match challenge_response.code.as_str() {
-        "active" => {
-            // The 'challenge' field is guaranteed to be present when code is "active"
+            // The 'challenge' field is guaranteed to be present
             let active_params = challenge_response.challenge.unwrap();
 
             // Perform deadline check here
@@ -128,23 +109,6 @@ pub fn poll_for_active_challenge(
                 // FIX: Removed internal thread::sleep.
                 Ok(None)
             }
-        }
-        "before" => {
-            print_non_active_status(&challenge_response);
-            println!("⏳ MINING IS NOT YET ACTIVE. Waiting...");
-            *current_id = "".to_string();
-            // FIX: Removed internal thread::sleep.
-            Ok(None)
-        }
-        "after" => {
-            print_non_active_status(&challenge_response);
-            println!("🛑 MINING PERIOD HAS ENDED. Waiting for the next challenge...");
-            *current_id = "".to_string();
-            // FIX: Removed internal thread::sleep.
-            Ok(None)
-        }
-        _ => Err(format!("Received unexpected challenge code: {}", challenge_response.code)),
-    }
 }
 
 pub fn get_challenge_params(
@@ -447,19 +411,12 @@ pub fn setup_app(cli: &crate::cli::Cli) -> Result<MiningContext, String> {
         return Err("COMMAND EXECUTED".to_string());
     }
 
-    // 3. Fetch T&C message (always required for registration payload)
-    let tc_response: TandCResponse = if cli.websocket {
-        // FIX: In WebSocket mode, skip API contact and use custom placeholder
-        let tos_message = "Please read the Terms of Service at https://sm.midnight.gd. Re-run with --accept-tos if you agree to the terms.".to_string();
+    let tc_response: TandCResponse = {
+        // Use the hard-coded constants from data_types.rs
         TandCResponse {
-            version: "WS-MOCK".to_string(),
-            content: tos_message.clone(), // Use custom content
-            message: "MOCK_WS_REGISTRATION_MESSAGE".to_string(), // Keep mock message for signing
-        }
-    } else {
-        match api::fetch_tandc(&client, &api_url) {
-            Ok(t) => t,
-            Err(e) => return Err(format!("Could not fetch T&C from API URL: {}. Details: {}", api_url, e)),
+            version: DEFENSIO_TOS_VERSION.to_string(),
+            content: DEFENSIO_TOS_CONTENT.to_string(),
+            message: DEFENSIO_REGISTRATION_MESSAGE.to_string(),
         }
     };
 

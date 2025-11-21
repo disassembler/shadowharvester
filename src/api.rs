@@ -12,18 +12,6 @@ use crate::data_types::{
 
 // --- API FUNCTIONS ---
 
-/// Fetches the T&C from the API, returning the full response object.
-pub fn fetch_tandc(client: &blocking::Client, api_url: &str) -> Result<TandCResponse, reqwest::Error> {
-    let url = format!("{}/TandC/1-0", api_url);
-    println!("-> Fetching Terms and Conditions from: {}", url);
-
-    let response = client.get(url).send()?;
-
-    let response = response.error_for_status()?;
-
-    response.json()
-}
-
 pub fn parse_cli_challenge_string(challenge_str: &str) -> Result<CliChallengeData, String> {
     let parts: Vec<&str> = challenge_str.split(',').collect();
 
@@ -289,23 +277,7 @@ pub fn fetch_challenge_status(client: &blocking::Client, api_url: &str) -> Resul
 /// Fetches and validates the active challenge parameters, returning data only if active.
 pub fn get_active_challenge_data(client: &blocking::Client, api_url: &str) -> Result<ChallengeData, String> {
     let challenge_response = fetch_challenge_status(client, api_url)?;
-
-    match challenge_response.code.as_str() {
-        "active" => {
-            // Unwrap is safe because 'challenge' should be present when code is "active"
-            Ok(challenge_response.challenge.unwrap())
-        }
-        "before" => {
-            let start_time = challenge_response.starts_at.unwrap_or_default();
-            Err(format!("MINING IS NOT YET ACTIVE. Starts at: {}", start_time))
-        }
-        "after" => {
-            Err("MINING PERIOD HAS ENDED.".to_string())
-        }
-        _ => {
-            Err(format!("Received unexpected challenge code: {}", challenge_response.code))
-        }
-    }
+        Ok(challenge_response.challenge.unwrap())
 }
 
 
