@@ -306,7 +306,7 @@ pub fn fetch_statistics(client: &blocking::Client, api_url: &str, address: &str)
             recent_crypto_receipts: api_data.global.recent_crypto_receipts,
             total_crypto_receipts: api_data.global.total_crypto_receipts,
             crypto_receipts: api_data.local.crypto_receipts,
-            night_allocation: api_data.local.night_allocation,
+            dfo_allocation: api_data.local.dfo_allocation,
         })
     } else {
         let body_text = response.text().unwrap_or_else(|_| format!("(Could not read response body for status {})", status));

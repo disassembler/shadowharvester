@@ -89,7 +89,7 @@ pub struct GlobalStatistics {
 #[derive(Debug, Deserialize)]
 pub struct LocalStatistics {
     pub crypto_receipts: u32,
-    pub night_allocation: u32,
+    pub dfo_allocation: u32,
 }
 
 // Struct representing the entire JSON response from the /statistics/:address endpoint
@@ -111,7 +111,7 @@ pub struct Statistics {
     pub recent_crypto_receipts: u32,
     // Local fields
     pub crypto_receipts: u32,
-    pub night_allocation: u32,
+    pub dfo_allocation: u32,
 }
 // Struct for the challenge parameters provided via CLI
 #[derive(Debug, Clone)]

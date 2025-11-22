@@ -249,7 +249,7 @@ async fn statistics_handler(_address: String, receipts: MockReceipts) -> Result<
         },
         "local": {
             "crypto_receipts": receipt_count,
-            "night_allocation": 1000000,
+            "dfo_allocation": 1000000,
         }
     })))
 }

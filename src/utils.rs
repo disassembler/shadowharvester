@@ -165,7 +165,7 @@ pub fn print_statistics(stats_result: Result<Statistics, String>, total_hashes: 
         Ok(stats) => {
             println!("** YOUR ACCOUNT STATISTICS (Address: {}) **", stats.local_address);
             println!("  Crypto Receipts (Solutions): {}", stats.crypto_receipts);
-            println!("  Night Allocation: {}", stats.night_allocation);
+            println!("  DFO Allocation: {}", stats.dfo_allocation);
             println!("----------------------------------------------");
             println!("** GLOBAL STATISTICS (All Miners) **");
             println!("  NOTE: These statistics are aggregated across all wallets globally.");
