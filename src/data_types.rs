@@ -150,7 +150,6 @@ pub struct PendingSolution {
     pub address: String,
     pub challenge_id: String,
     pub nonce: String,
-    pub donation_address: Option<String>,
     // FIX: Add fields for error logging and identification
     pub preimage: String, // The full string used for hashing
     pub hash_output: String, // The final Blake2b hash output (hex encoded)
