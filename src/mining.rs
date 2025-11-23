@@ -303,7 +303,16 @@ pub fn run_mnemonic_sequential_mining(cli: &Cli, context: MiningContext, mnemoni
         if match max_registered_index { Some(idx) => wallet_deriv_index > idx, None => true } {
             let stats_result = api::fetch_statistics(&context.client, &context.api_url, &mining_address);
             match stats_result {
-                Ok(stats) => { println!("  Crypto Receipts (Solutions): {}", stats.crypto_receipts); println!("  DFO Allocation: {}", stats.dfo_allocation); }
+                Ok(stats) => {
+                    println!("  Crypto Receipts (Solutions): {}", stats.crypto_receipts);
+                    println!("  DFO Allocation: {}", stats.dfo_allocation);
+                    if stats.crypto_receipts == 0 {
+                        let reg_signature = cardano::cip8_sign(&key_pair, &reg_message);
+                        if let Err(e) = api::register_address(&context.client, &context.api_url, &mining_address, &reg_message, &reg_signature.0, &hex::encode(key_pair.1.as_ref())) {
+                            eprintln!("Registration failed: {}. Retrying with exponential backoff...", e); backoff_reg.sleep(); continue;
+                        }
+                    }
+                }
                 Err(_) => {
                     let reg_signature = cardano::cip8_sign(&key_pair, &reg_message);
                     if let Err(e) = api::register_address(&context.client, &context.api_url, &mining_address, &reg_message, &reg_signature.0, &hex::encode(key_pair.1.as_ref())) {

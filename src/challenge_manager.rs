@@ -265,7 +265,19 @@ pub fn run_challenge_manager(
                 // Handle conditional registration and stats print
                 match stats_result {
                     Ok(ref stats) => { // Stats successfully fetched (implies HTTP mode)
-                         println!("📋 Address {} is already registered (Receipts: {}). Skipping registration.", address_str, stats.crypto_receipts);
+                        if stats.crypto_receipts == 0 {
+                            if let Err(reg_e) = api::register_address(
+                                &context.client, &context.api_url, &address_str, &reg_message, &reg_signature.0, &hex::encode(pubkey.as_ref()),
+                            ) {
+                                eprintln!("⚠️ Address registration failed for {}: {}. Continuing attempt to mine...", address_str, reg_e);
+                            } else {
+                                println!("📋 Address registered successfully: {}", address_str);
+                                // Re-fetch stats after successful registration, discarding the result with `let _ = ...`
+                                let _ = api::fetch_statistics(&context.client, &context.api_url, &address_str);
+                            }
+                        } else {
+                            println!("📋 Address {} is already registered (Receipts: {}). Skipping registration.", address_str, stats.crypto_receipts);
+                        }
                     },
                     Err(ref e) if e == "WebSocket mode: API contact skipped." => { // Handle WS skip gracefully
                         println!("📋 Address registration and statistics fetch skipped (WebSocket Mode).");
